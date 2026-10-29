@@ -2,6 +2,11 @@ import datetime as dt
 import unittest
 from unittest.mock import patch
 import nba
+import providers
+import relay
+import gzip
+import struct
+import zlib
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
@@ -40,7 +45,7 @@ class DiscoveryTests(unittest.TestCase):
                 return {'streams':[{'streams':[{'name':'Lakers vs Clippers', 'starts_at':int(self.start.timestamp()),
                     'iframe':'https://example.com/embed/game', 'source_tag':'Home'}]}]}
             raise OSError('unavailable')
-        with patch.object(nba, 'request', side_effect=fetch):
+        with patch.object(nba, 'request', side_effect=fetch), patch.object(nba, 'monster_feeds', return_value=[]), patch.object(nba, 'directory_feeds', return_value=[]):
             feeds, errors = nba.fetch_feeds(self.game, {})
         self.assertEqual(len(feeds), 1)
         self.assertTrue(errors[0].startswith('StreamFree:'))
@@ -66,6 +71,41 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(url.startswith(f'{base}/live-cdn/{key}1080p2/index.m3u8?'))
         self.assertIn('_t=fresh', url)
         self.assertEqual(headers['Referer'], f'{base}/embed/basketball/{key}1080p2')
+
+    def test_directory_matches_event_and_skips_other_matchups(self):
+        card = f'<a class="card" href="/game/1"><span data-cd="{int(self.start.timestamp())}">Live</span><span>LA Clippers</span><span>Los Angeles Lakers</span></a>'
+        def row(name, url, channel):
+            return '<tr>' + ''.join(f'<td class="{cls}"><a href="{url}">{text}</a></td>' for cls,text in [('', 'x'),('who',name),('','Gold'),('','HD'),('','English'),('','2'),('',channel)]) + '</tr>'
+        table = row('OK','https://example.com/lakers-vs-clippers/','Spectrum SportsNet USA') + row('Wrong','https://example.com/lakers-vs-celtics/','Other')
+        def fetch(url, *args, **kwargs):
+            return (card if url == providers.NBABITE + '/' else table, url)
+        with patch.object(providers, 'fetch_html', side_effect=fetch):
+            results=providers.nbabite_entries(self.game, nba.title_matches)
+        self.assertEqual([r['name'] for r in results], ['OK'])
+        self.game.broadcasts=['Spectrum Sports Net (Away)']
+        self.assertEqual(nba.channel_side(results[0]['channel'], self.game), 'away')
+
+    def test_candidate_follows_iframes_and_finds_tokenized_player(self):
+        pages = {
+            'https://one.example/watch':'<iframe src="https://two.example/player"></iframe>',
+            'https://two.example/player': 'const SRC="https://edge.example/a/index.m3u8"; const EDGE="https://edge.example"; const CHANNEL="premium982"; fetch("/api/playlist-token");'
+        }
+        with patch.object(providers, 'fetch_html', side_effect=lambda url, *a, **kw:(pages[url],url)):
+            result=providers.extract_player('https://one.example/watch')
+        self.assertEqual(result['kind'], 'relay')
+        self.assertEqual(result['channel'], 'premium982')
+        self.assertFalse(providers.public_url('http://127.0.0.1/private'))
+
+    def test_image_wrapped_transport_stream(self):
+        ts = b'\x47' + b'\x00'*187 + b'\x47' + b'\x00'*187
+        payload = gzip.compress(ts)
+        rgb = b'TIKTIKPX' + struct.pack('>I',len(payload)) + payload
+        rgb += b'\x00' * (-len(rgb) % 3)
+        def chunk(kind, value):
+            return struct.pack('>I',len(value)) + kind + value + struct.pack('>I',zlib.crc32(kind+value))
+        ihdr=struct.pack('>IIBBBBB',len(rgb)//3,1,8,2,0,0,0)
+        png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',ihdr)+chunk(b'IDAT',zlib.compress(b'\x00'+rgb))+chunk(b'IEND',b'')
+        self.assertEqual(relay.unwrap_segment(png),ts)
 
     def test_mpv_headers_are_arguments_not_shell_and_reject_injection(self):
         command = nba.mpv_command('https://example.com/a.m3u8',

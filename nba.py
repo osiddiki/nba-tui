@@ -17,7 +17,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import webbrowser
+import providers
+import relay
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
@@ -311,15 +312,15 @@ def addon_feeds(manifest, game):
             headers = {}
         if safe_url(url):
             out.append(Feed('Add-on', label or 'Stream', feed_side(label), url, 'direct', headers, 'media link from add-on; availability not yet checked'))
-        elif safe_url(s.get('externalUrl', '')):
-            out.append(Feed('Add-on', label or 'Web player', feed_side(label), s['externalUrl'], 'web', note='browser only'))
     return out
 
 
 def fetch_feeds(game, config):
     out, errors = [], []
     tasks = [('StreamFree', lambda: sf_feeds(request(SF), game)),
-             ('PPV', lambda: ppv_feeds(request(PPV), game))]
+             ('PPV', lambda: ppv_feeds(request(PPV), game)),
+             ('NBA Monster', lambda: monster_feeds(game)),
+             ('NBA Bite', lambda: directory_feeds(game))]
     if config.get('addon'):
         tasks.append(('Add-on', lambda: addon_feeds(config['addon'], game)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
@@ -330,6 +331,37 @@ def fetch_feeds(game, config):
             except (OSError, ValueError, KeyError, TypeError) as e:
                 errors.append(f'{name}: {type(e).__name__}')
     return out, errors
+
+
+def channel_side(channel, game):
+    explicit = feed_side(channel)
+    if explicit != 'unknown': return explicit
+    # A generic League Pass label may carry either side; do not guess.
+    if 'league pass' in channel.lower(): return 'unknown'
+    clean = lambda x: re.sub(r'[^a-z0-9]', '', x.lower())
+    candidate = clean(channel)
+    sides = set()
+    for broadcast in game.broadcasts:
+        side = feed_side(broadcast)
+        name = clean(re.sub(r'\s*\((?:Home|Away)\)\s*$', '', broadcast, flags=re.I))
+        if side != 'unknown' and len(name) >= 6 and name in candidate: sides.add(side)
+    return next(iter(sides)) if len(sides) == 1 else 'unknown'
+
+
+def directory_feeds(game):
+    out = []
+    for item in providers.nbabite_entries(game, title_matches):
+        channel = item['channel'] or 'Unknown channel'
+        label = f"{item['name']} | {channel} | {item['quality']} | {item['language']}"
+        out.append(Feed('NBA Bite', label, channel_side(channel, game), item['url'], 'candidate',
+                        note='directory listing; resolved when selected', metadata={'referer':providers.NBABITE+'/'}))
+    return out
+
+
+def monster_feeds(game):
+    return [Feed('NBA Monster', item['name'], url=item['url'], kind='candidate',
+                 note='directory listing; resolved when selected', metadata={'referer':providers.MONSTER+'/'})
+            for item in providers.monster_entries(game)]
 
 
 def mpv_command(url, headers=None, *, cache=15, terminal_video=False):
@@ -356,6 +388,7 @@ class App:
         self.message = 'Loading games...'
         self.errors = []
         self.helper = None
+        self.relay = None
         self.resolver_owned = False
         self.cache = int(config.get('cache', 15)) if str(config.get('cache', 15)) in ('5','15','30') else 15
         self.terminal_video = bool(config.get('terminal_video', False))
@@ -408,11 +441,11 @@ class App:
             for y, feed in enumerate(fs[start:start+rows], 6):
                 selected = start+y-6 == self.fi
                 side = feed.side.upper() if feed.side != 'unknown' else '?'
-                kind = {'ppv':'MPV*', 'sf':'MPV', 'direct':'MPV', 'web':'WEB'}[feed.kind]
-                self.put(y, 2, f'{">" if selected else " "} [{side:7}] {feed.source:10} {feed.label} [{kind}]', curses.A_REVERSE if selected else 0)
+                kind = {'ppv':'MPV*', 'sf':'MPV', 'direct':'MPV', 'web':'WEB', 'candidate':'TRY'}[feed.kind]
+                self.put(y, 2, f'{">" if selected else " "} [{side:7}] [{kind}] {feed.source}: {feed.label}', curses.A_REVERSE if selected else 0)
             if not fs:
                 self.put(6, 2, 'Looking for streams...' if self.message == 'Checking sources...' else 'No matching feeds. Try refresh near tipoff or change the filter.')
-            self.put(h-4, 1, 'Enter play   b browser   f filter   r refresh   Esc back')
+            self.put(h-4, 1, 'Enter play   i inspect   f filter   r refresh   Esc back')
             self.put(h-3, 1, 'c cache   v video   u URL   a add-on   s resolver   q quit')
         self.put(h-1, 1, self.message)
         self.scr.refresh()
@@ -431,7 +464,7 @@ class App:
         self.gi = min(self.gi, max(0, len(self.games)-1))
 
     def refresh_feeds(self):
-        self.message = 'Checking sources...'; self.render()
+        self.feeds = []; self.message = 'Checking sources...'; self.render()
         self.feeds, self.errors = fetch_feeds(self.games[self.gi], self.config)
         self.fi = 0
         self.message = f'{len(self.feeds)} choices found' + (' | ' + ', '.join(self.errors) if self.errors else '')
@@ -500,35 +533,53 @@ class App:
             time.sleep(.1)
         raise RuntimeError('Resolver did not start on localhost:38765.')
 
+    def resolve_feed(self, feed):
+        url, headers = feed.url, feed.headers
+        if feed.kind == 'candidate':
+            found = providers.extract_player(feed.url, referer=feed.metadata.get('referer'))
+            if found['kind'] == 'sf':
+                feed = Feed(feed.source, feed.label, feed.side, found['url'], 'sf',
+                            metadata={k:found[k] for k in ('key','quality','variant')})
+            elif found['kind'] == 'ppv':
+                feed = Feed(feed.source, feed.label, feed.side, found['url'], 'ppv')
+            elif found['kind'] == 'relay':
+                if self.relay is None: self.relay = relay.Relay()
+                url = self.relay.add(found['url'],found['edge'],found['channel'],found['referer'])
+                check_playlist(url)
+                return url, {}
+            else:
+                referer = found['referer']
+                p = urllib.parse.urlsplit(referer)
+                headers = {'Referer':referer, 'Origin':p.scheme+'://'+p.netloc, 'User-Agent':UA}
+                url = found['url']; check_playlist(url, headers)
+                return url, headers
+            url, headers = feed.url, feed.headers
+        if feed.kind == 'sf':
+            url, headers = resolve_streamfree(feed)
+            check_playlist(url, headers)
+        if feed.kind == 'ppv':
+            self.ensure_helper()
+            data = request(RESOLVER + '/api/embed', data={'iframe':feed.url}, timeout=35)
+            url = data.get('proxiedUrl', '')
+            if not data.get('ok') or not safe_url(url):
+                raise RuntimeError(data.get('error', 'No playable URL returned'))
+            u = urllib.parse.urlsplit(url)
+            if u.hostname not in ('localhost','127.0.0.1') or u.port != 38765:
+                raise RuntimeError('Unexpected resolver URL')
+            headers = {}
+            check_playlist(url)
+        return url, headers
+
     def play(self, feed):
         if feed.kind == 'web':
-            self.message = 'Browser-only source. Press b to open it.'; return
+            self.message = 'This add-on supplied a browser-only source.'; return
         if not shutil.which('mpv'):
             self.message = 'mpv is not installed or not on PATH.'; return
-        url, headers = feed.url, feed.headers
-        if feed.kind == 'sf':
-            self.message = 'Getting a fresh stream link...'; self.render()
-            try:
-                url, headers = resolve_streamfree(feed)
-                check_playlist(url, headers)
-            except (OSError, ValueError, KeyError) as e:
-                self.message = f'Stream unavailable: {e}'; return
-        if feed.kind == 'ppv':
-            self.message = 'Resolving selected broadcast...'; self.render()
-            try:
-                self.ensure_helper()
-                data = request(RESOLVER + '/api/embed', data={'iframe':feed.url}, timeout=35)
-                url = data.get('proxiedUrl', '')
-                if not data.get('ok') or not safe_url(url):
-                    raise RuntimeError(data.get('error', 'No playable URL returned'))
-                # Only trust the local helper's relay, not a URL to an unrelated host.
-                u = urllib.parse.urlsplit(url)
-                if u.hostname not in ('localhost','127.0.0.1') or u.port != 38765:
-                    raise RuntimeError('Unexpected resolver URL')
-                headers = {}
-                check_playlist(url)
-            except (OSError, ValueError, RuntimeError) as e:
-                self.message = f'Resolver failed: {e}'; return
+        self.message = 'Resolving selected stream...'; self.render()
+        try:
+            url, headers = self.resolve_feed(feed)
+        except (OSError, ValueError, KeyError, RuntimeError) as e:
+            self.message = f'Stream unavailable: {e}'; return
         self.message = 'Starting mpv. Press q in mpv to return.'; self.render()
         curses.def_prog_mode(); curses.endwin()
         try:
@@ -540,6 +591,7 @@ class App:
             curses.reset_prog_mode(); self.scr.refresh()
 
     def close(self):
+        if self.relay: self.relay.close()
         if self.resolver_owned and self.helper and self.helper.poll() is None:
             self.helper.terminate()
             try: self.helper.wait(timeout=3)
@@ -580,12 +632,22 @@ class App:
                     filters = ['all','home','away','unknown'];
                     if self.games[self.gi].lakers_side: filters.insert(1, 'lakers')
                     self.filter = filters[(filters.index(self.filter)+1)%len(filters)]; self.fi=0
-                elif self.mode == 'feeds' and key == ord('b') and self.visible_feeds():
+                elif self.mode == 'feeds' and key == ord('i') and self.visible_feeds():
                     feed = self.visible_feeds()[self.fi]
-                    if feed.kind == 'direct': self.message = 'This is a media URL; press Enter for mpv.'
-                    else:
-                        try: self.message = 'Opened browser.' if webbrowser.open(feed.url) else 'Could not open a browser.'
-                        except Exception: self.message = 'Could not open a browser.'
+                    self.message = 'Resolving selected stream...'; self.render()
+                    try:
+                        if feed.kind == 'web': raise ValueError('No media URL for this source')
+                        url, headers = self.resolve_feed(feed)
+                        curses.def_prog_mode(); curses.endwin()
+                        try:
+                            print('\nMedia URL (may expire; localhost links need this app open):\n'+url)
+                            for name, value in headers.items(): print(name+': '+value)
+                            input('\nPress Enter to return...')
+                        finally:
+                            curses.reset_prog_mode(); self.scr.clear(); self.scr.refresh()
+                        self.message = 'Stream link shown.'
+                    except (OSError, ValueError, KeyError, RuntimeError) as e:
+                        self.message = f'Stream unavailable: {e}'
                 elif self.mode == 'feeds' and key == ord('c'):
                     self.cache = {5:15,15:30,30:5}[self.cache]; self.config['cache']=self.cache; save_config(self.config)
                 elif self.mode == 'feeds' and key == ord('v'):
