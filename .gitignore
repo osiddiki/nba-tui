@@ -1,0 +1,13 @@
+# Installed by setup.sh; kept separate from this project's source.
+/resolver/
+
+# Python cache and local environments.
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Build and editor files.
+build/
+dist/
+.DS_Store
