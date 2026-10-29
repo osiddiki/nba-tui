@@ -18,11 +18,11 @@ if [ ! -f resolver/src/server.js ]; then
 fi
 npm install --prefix resolver --ignore-scripts --no-audit --no-fund
 if command -v mpv >/dev/null 2>&1; then
-  echo 'Ready: ./sports-cli'
+  echo 'Ready: ./sports_live'
 elif [ "$(uname -s)" = Darwin ] && { command -v iina-cli >/dev/null 2>&1 || command -v iina >/dev/null 2>&1 || [ -x /Applications/IINA.app/Contents/MacOS/iina-cli ] || [ -x "$HOME/Applications/IINA.app/Contents/MacOS/iina-cli" ]; }; then
-  echo 'Ready: ./sports-cli (press p in the stream list to select IINA)'
+  echo 'Ready: ./sports_live (press p in the stream list to select IINA)'
 elif [ "$(uname -s)" = Linux ] && command -v celluloid >/dev/null 2>&1; then
-  echo 'Ready: ./sports-cli (press p in the stream list to select Celluloid)'
+  echo 'Ready: ./sports_live (press p in the stream list to select Celluloid)'
 else
-  echo 'Install mpv, IINA on macOS, or Celluloid on Linux, then run ./sports-cli'
+  echo 'Install mpv, IINA on macOS, or Celluloid on Linux, then run ./sports_live'
 fi

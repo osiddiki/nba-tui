@@ -1,8 +1,8 @@
 # Sports Live
 
-Find a game or replay in your terminal, choose a source, and play it in mpv, IINA, or Celluloid. The app loads only the league and game you select, and shows source results as they arrive. Its compact browsing flow takes inspiration from [ani-cli](https://github.com/pystardust/ani-cli).
+Find a game or replay in your terminal, choose a source, and play it in mpv, IINA, or Celluloid. Search suggestions appear as you type; the app loads only the relevant schedules and replay catalogs, then finds streams for the game you select. Its compact browsing flow takes inspiration from [ani-cli](https://github.com/pystardust/ani-cli).
 
-Live schedules cover NBA, WNBA, NFL, NCAA football, men's and women's NCAA basketball, MLB, NHL, and soccer: MLS, Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Liga MX, and UEFA Champions League. Replays have a separate archive view.
+Live schedules cover NBA, WNBA, NFL, NCAA football, men's and women's NCAA basketball, MLB, NHL, and soccer: MLS, Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Liga MX, and UEFA Champions League. Search includes replays from supported archives.
 
 ## Install
 
@@ -34,20 +34,22 @@ Check `node --version`; if it is below 20, install a newer version from [Node.js
 git clone https://github.com/osiddiki/nba-tui.git
 cd nba-tui
 ./setup.sh
-./sports-cli
+./sports_live
 ```
 
-The setup script installs a pinned copy of the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) in `resolver/`. You can run `./sports-cli` without setup if you do not need PPV sources. To update an existing checkout later, run `git pull` and then `./sports-cli`.
+The setup script installs a pinned copy of the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) in `resolver/`. You can run `./sports_live` without setup if you do not need PPV sources. To update an existing checkout later, run `git pull` and then `./sports_live`. The older `./sports-cli` command remains available.
 
 ## First run
 
-1. Choose a sport or league on the opening screen. Press `s` at any game, replay, or source list to change it. Use `[` and `]` to change the schedule date, or `/` to search for a team. In the NBA list, `l` quickly filters for the Lakers.
-2. Select a game with the arrow keys or `j` / `k`, then press `Enter`. Sources appear as each directory responds. ESPN's completed games and sources explicitly marked offline are hidden.
-3. Select a source and press `Enter` to play. Press `o` to filter by provider, `f` to filter by broadcast side, or `/` to search sources and channels. Press `r` to refresh.
+1. Start typing on the opening screen, for example `lakers today`, `mavs vs rockets`, `lakers vs blazers oct 27`, or `tamu vs alabama`. Team suggestions appear locally; live games, upcoming games, and matching replays appear as the relevant services respond. Common nicknames and some spelling errors work too.
+2. Use the arrow keys to select a game or replay and press `Enter` to find its streams. Selecting a team suggestion fills in its name so you can refine the search. `Ctrl-U` clears the query; `Ctrl-R` refreshes it. Press `Tab` to browse sports and leagues instead.
+3. Select a source and press `Enter` to play. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `f` by broadcast side, or `/` to search providers and channels. Press `r` to refresh.
 4. On macOS, press `p` to switch between mpv and IINA. On Linux, `p` switches between mpv and Celluloid. The graphical player must be installed first.
-5. For past games, return to the game list and press `R`. Choose a league with `s`, search with `/`, choose a replay, then choose a server. Press `R` to return to live games.
+5. To browse archives by league, press `Tab` from search, select a league, then press `R` in its game list. Press `R` again to return to games. Press `s` in a game, replay, or stream list to choose a different sport.
 
-Press `?` at any time for the in-app controls. `Esc` goes back and `q` quits. The schedule date is in Eastern time; game times are displayed in your machine's local timezone.
+Press `?` for the in-app controls and `Ctrl-F` to return to global search from another screen. `Esc` goes back. `Ctrl-X` quits from search; `q` quits from the other lists. The schedule date is in Eastern time; game times are displayed in your machine's local timezone. Completed games are omitted from live schedules but may appear as replays.
+
+Search uses a small bundled team index and local fuzzy matching; it does not download or run an AI model. Network requests start only after you type a team or league, and query at most three relevant leagues. Results depend on what schedules and archives provide.
 
 When using mpv, close its window or press `q` in mpv to return to the picker. IINA and Celluloid open separate windows, leaving the picker usable. **Keep the terminal app open while playing a local relay stream.**
 
@@ -55,8 +57,9 @@ When using mpv, close its window or press `q` in mpv to return to the picker. II
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓`, `j` / `k`, `Enter`, `Esc` | Move, select, or go back |
-| `s` (or `S`), `[`, `]`, `/`, `l` | Sport or league, date, search, or Lakers shortcut |
+| `↑` / `↓`, `Enter`, `Esc` | Move, select, or go back (`j` / `k` also move outside search) |
+| `Ctrl-F`, `Tab`, `Ctrl-U`, `Ctrl-R`, `Ctrl-X` | Global search, browse sports, clear, refresh, or quit search |
+| `s` (or `S`), `[`, `]`, `/`, `l` | Choose sport, change schedule date, search, or filter for the Lakers |
 | `R` | Switch between the live schedule and replays |
 | `f`, `o`, `r` | Broadcast side, provider, or refresh |
 | `t`, `g`, `i` | Test a source, rank sources by checks, or inspect its media URL |
@@ -64,7 +67,7 @@ When using mpv, close its window or press `q` in mpv to return to the picker. II
 | `u`, `a`, `d` | Paste a media URL, configure an add-on, or select a PPV resolver directory |
 | `?`, `q` | Help or quit |
 
-Keys are case-sensitive except for `s` / `S`. `./sports-cli --list --league wnba` prints a plain-text schedule and the first game's streams. `./sports-cli --league ncaaf` opens college football directly; `./sports-cli --date 2026-10-31` selects a schedule date. Run `./sports-cli --help` for all league codes.
+Keys are case-sensitive except for `s` / `S`. `./sports_live --list --league wnba` prints a plain-text schedule and the first game's streams. `./sports_live --league ncaaf` opens college football directly; `./sports_live --league nba --date 2026-10-31` selects a schedule date. Run `./sports_live --help` for all league codes.
 
 ## Sources and options
 
@@ -78,9 +81,9 @@ Keys are case-sensitive except for `s` / `S`. `./sports-cli --list --league wnba
 | NBA Bite, NBA Monster | Additional NBA directories; individual embedded players are resolved when selected. |
 | Sports add-on | Optional compatible Stremio manifest configured with `a`; results depend on the add-on. |
 
-`PLAY` indicates a supported direct or resolver-backed source. `TRY` is a directory listing whose player must still be resolved. `?` for broadcast side means the directory did not identify home or away. Labels can be wrong and directories can list the same stream more than once. Sources that do not report live status may still be unavailable.
+A dash for broadcast side or quality means the directory did not provide it. A `~` before quality, such as `~1080p`, means the directory reported that value; a value without `~` came from a source check. Labels can be wrong and directories can list the same stream more than once. Sources that do not report live status may still be unavailable.
 
-While choices load, the app checks up to two supported sources per directory in the background. `[OK]` means it reached a playlist and one media segment; `[HTTP 403]` or `[?]` means the quick check could not verify it. A single failed check may be temporary, so the option remains available. PPV sources are resolved when selected instead. Results appear without waiting for these checks.
+While choices load, the app checks up to two supported sources per directory in the background. `OK` means it reached a playlist and one media segment; `Checking`, `Unverified`, or a status such as `HTTP 403` describes other outcomes. A single failed check may be temporary, so the option remains available. PPV sources are resolved when selected instead. Results appear without waiting for these checks.
 
 If resolution, a test, or mpv playback fails, the source is hidden for the current list. Press `r` to fetch the list again. A missing local dependency is reported without hiding the source. Some players use short-lived tokens or wrapped video segments; the session-only relay on `127.0.0.1` refreshes tokens and supplies normal HLS to the player. Its URLs stop working when the app exits.
 
@@ -94,9 +97,15 @@ Press `t` to resolve the selected source and read part of one segment from your 
 
 The last 20 manual `t` checks are stored per provider, server, or channel; background checks do not affect grades. After at least three tests, A, B, C, and D correspond to success rates of at least 90%, 70%, 50%, and below 50%; fewer tests show `?`. The adjacent count shows the number of successful and total checks. Press `g` to rank tested sources by these results.
 
+### Ad mute
+
+To enable ad mute for one run, start with `./sports_live --ad-mute`. Normal launches leave it off. It currently works only in mpv for complete replay HLS playlists with explicit `EXT-X-CUE-OUT` / `EXT-X-CUE-IN` ad markers. The app mutes at marked breaks and restores sound afterward if it was responsible for muting. It does not download a model, send frames to a service, or run AI.
+
+Most live streams tested do not include these markers, and this setting does not yet detect their commercials. A replay without markers, IINA, and Celluloid also play without automatic muting. Manual mute controls remain available in the player.
+
 ### Add-ons and resolver
 
-Press `a` to configure a compatible sports Stremio add-on. For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./sports-cli --addon 'https://…/manifest.json'`.
+Press `a` to configure a compatible sports Stremio add-on. For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./sports_live --addon 'https://…/manifest.json'`.
 
 The PPV helper runs only when needed on `127.0.0.1:38765` and is closed on exit if the app started it. To use a different checkout, press `d` or pass `--resolver-dir /path/to/ppv-hls-proxy`; run `npm install` in that checkout first. Settings are saved with owner-only permissions in `${XDG_CONFIG_HOME:-~/.config}/nba-tui/config.json`. Source-check history does not store media URLs or tokens. The app does not decrypt DRM-protected streams.
 

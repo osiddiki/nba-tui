@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -24,6 +25,8 @@ import providers
 import relay
 import grading
 import replays
+import smart_search
+import ad_mute
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
@@ -55,12 +58,15 @@ NTV = 'https://ntv.st'
 RESOLVER = 'http://127.0.0.1:38765'
 CONFIG = pathlib.Path(os.environ.get('XDG_CONFIG_HOME', pathlib.Path.home() / '.config')) / 'nba-tui' / 'config.json'
 HELP_LINES = [
+    'SEARCH         Type a team or matchup    arrows: select    Enter: open',
+    'GLOBAL         Ctrl-F: search from anywhere    Tab: browse sports',
     'NAVIGATE       Up/Down or j/k: move    Enter: select    Esc: back',
     'SCHEDULE       s: sport    [ / ]: date    /: team search    l: Lakers',
     'REPLAYS        R: replay archive    s: sport    /: search titles',
     'SOURCES        f: broadcast side    o: provider    /: search choices',
     'CHECKS         t: test selected source    g: rank by your checks',
     'PLAYERS        p: player    c: cache    v: terminal video (mpv)',
+    'AD MUTE        --ad-mute: marked replays in mpv only',
     'MORE           i: show media URL    u: play a pasted media URL',
     'SETUP          a: sports add-on    d: local PPV resolver',
     'REFRESH        r: reload current list    q: quit',
@@ -187,6 +193,40 @@ class Feed:
     headers: dict = field(default_factory=dict)
     note: str = ''
     metadata: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FeedDisplay:
+    name: str
+    side: str
+    quality: str
+    check: str
+    detail: str
+
+
+def describe_feed(feed, record=None, automatic=None):
+    """Turn provider-specific labels into consistent, readable stream rows."""
+    parts = [part.strip() for part in feed.label.split('|') if part.strip()]
+    server = re.sub(r'\s*\((?:home|away)\)\s*$', '', parts[0] if parts else feed.label, flags=re.I)
+    details, listed_quality = [], ''
+    for part in parts[1:]:
+        if re.fullmatch(r'\d{3,4}p|4k|hd|sd', part, re.I):
+            listed_quality = part.upper() if part.lower() in ('hd','sd','4k') else part.lower()
+        elif part.lower() == 'live':
+            details.append('Provider reports live')
+        elif part.lower() != 'status unknown':
+            details.append(part)
+    record = record if isinstance(record, dict) else {}
+    height = record.get('height')
+    quality = f'{height}p' if isinstance(height, int) and height >= 144 else f'~{listed_quality}' if listed_quality else '-'
+    status = {'checking':'Checking', 'OK':'OK', '?':'Unverified'}.get(automatic, automatic or 'Unverified')
+    grade = grading.summary(record)
+    if grade:
+        grade = re.sub(r'\s+\d+p$', '', grade)
+        status += f' {grade}'
+    if not details and feed.kind == 'candidate': details.append('Player resolves on selection')
+    return FeedDisplay(f'{feed.source} / {server}', feed.side.upper() if feed.side != 'unknown' else '-',
+                       quality, status, ' | '.join(details))
 
 
 class DependencyError(RuntimeError):
@@ -609,10 +649,26 @@ def quick_probe_feed(feed):
 
 
 class App:
-    def __init__(self, screen, config):
+    def __init__(self, screen, config, *, ad_mute_enabled=False):
         self.scr, self.config = screen, config
         self.games, self.all_games, self.feeds = [], [], []
         self.replays = []
+        self.search_index = smart_search.default_index()
+        self.search_query = ''
+        self.search_plan = smart_search.make_plan(self.search_index, smart_search.parse_query(''))
+        self.search_results = []
+        self.search_position = 0
+        self.search_touched = False
+        self.search_return = None
+        self.search_cache = {}
+        self.search_needed = set()
+        self.search_work = []
+        self.search_inflight = set()
+        self.search_queue = queue.Queue()
+        self.search_jobs = queue.Queue()
+        self.search_workers_started = False
+        self.search_sources = {}
+        self.search_due = None
         self.day = default_day()
         self.league = 'nba'
         self.league_index = 0
@@ -622,8 +678,9 @@ class App:
         self.feed_search = ''
         self.replay_search = ''
         self.gi = self.fi = self.ri = 0
-        self.mode = 'leagues'
+        self.mode = 'search'
         self.feed_context = 'live'
+        self.feed_return = None
         self.current_replay = None
         self.help_return = 'games'
         self.help_scroll = 0
@@ -631,7 +688,7 @@ class App:
         self.loading_games = False
         self.filter = 'all'
         self.provider_filter = 'all'
-        self.message = 'Choose a sport or league.'
+        self.message = 'Start typing a team, matchup, or league.'
         self.errors = []
         self.feed_queue = queue.Queue()
         self.feed_generation = 0
@@ -656,6 +713,7 @@ class App:
         self.resolver_owned = False
         self.cache = int(config.get('cache', 15)) if str(config.get('cache', 15)) in ('5','15','30') else 15
         self.terminal_video = bool(config.get('terminal_video', False))
+        self.ad_mute = ad_mute_enabled
         self.player = config.get('player', 'mpv') if config.get('player', 'mpv') in ('mpv', 'iina', 'celluloid') else 'mpv'
         self.rank_by_checks = False
 
@@ -667,6 +725,15 @@ class App:
             self.scr.addnstr(y, x, str(s), max(0, w-x-1), attr)
         except curses.error:
             pass
+
+    def read_key(self):
+        try:
+            raw = self.scr.get_wch() if hasattr(self.scr, 'get_wch') else self.scr.getch()
+        except curses.error:
+            return -1, None
+        if isinstance(raw, str):
+            return ord(raw), raw if raw.isprintable() else None
+        return raw, chr(raw) if 32 <= raw <= 126 else None
 
     def visible_feeds(self):
         side = self.games[self.gi].lakers_side if self.filter == 'lakers' and self.feed_context == 'live' else self.filter
@@ -683,13 +750,29 @@ class App:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         self.put(0, 1, 'SPORTS LIVE', curses.A_BOLD)
-        heading = {'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'feeds':'Broadcasts', 'help':'Help'}
+        heading = {'search':'Find a game', 'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'feeds':'Broadcasts', 'help':'Help'}
         self.put(1, 1, heading.get(self.mode, ''), curses.A_BOLD)
         if h < 12 or w < 48:
             self.put(3, 1, 'Please enlarge your terminal to at least 48 x 12.')
-            self.put(h-2, 1, 'q quit')
+            self.put(h-2, 1, 'Ctrl-X quit' if self.mode == 'search' else 'q quit')
             self.scr.refresh(); return
-        if self.mode == 'help':
+        if self.mode == 'search':
+            self.put(2, 1, 'Search: ' + (self.search_query or '') + '_', curses.A_BOLD)
+            rows = max(1, h-7)
+            start = max(0, self.search_position-rows+1)
+            for y, hit in enumerate(self.search_results[start:start+rows], 3):
+                selected = start+y-3 == self.search_position
+                badge = {'live':'LIVE', 'upcoming':'UPCOMING', 'replay':'REPLAY', 'team':'TEAM'}[hit.kind]
+                league = LEAGUES.get(hit.league, (hit.league,))[0]
+                extra = f'  |  {hit.item.source}' if hit.kind == 'replay' else ''
+                attr = curses.A_REVERSE if selected else self.live_color if hit.kind == 'live' else 0
+                self.put(y, 2, f'{">" if selected else " "} [{badge:8}] {hit.title}  |  {league}{extra}', attr)
+            if not self.search_results:
+                text = 'Try: lakers today  |  mavs vs rockets  |  tamu vs alabama' if not self.search_query else 'Looking for matches...' if self.search_inflight & self.search_needed else 'Keep typing a team or league.'
+                self.put(4, 2, text)
+            self.put(h-4, 1, 'Type to search   Up/Down select   Enter open')
+            self.put(h-3, 1, 'Tab sports   Ctrl-U clear   ? help   Ctrl-X quit')
+        elif self.mode == 'help':
             rows = max(1, h-6)
             for y, line in enumerate(HELP_LINES[self.help_scroll:self.help_scroll+rows], 3):
                 self.put(y, 2, line)
@@ -736,22 +819,27 @@ class App:
                 self.put(2, 1, f'{game.title}  |  {game.start.astimezone().strftime("%a %b %d %I:%M %p %Z")}')
                 self.put(3, 1, 'TV: ' + (', '.join(game.broadcasts) or 'not listed'))
             rank = '  |  ranked' if self.rank_by_checks else ''
-            self.put(4, 1, f'{self.player.upper()}  |  side: {self.filter}  |  source: {self.provider_filter}  |  search: {self.feed_search or "all"}  |  cache: {self.cache}s{rank}')
+            self.put(4, 1, f'{self.player.upper()}  |  side: {self.filter}  |  source: {self.provider_filter}  |  search: {self.feed_search or "all"}  |  cache: {self.cache}s  |  ad mute: {"on" if self.ad_mute else "off"}{rank}')
             fs = self.visible_feeds()
             self.fi = min(self.fi, max(0, len(fs)-1))
-            rows = max(1, h-11)
+            name_width = max(14, min(50, w-40))
+            self.put(5, 4, f'{"SOURCE / SERVER":<{name_width}}  {"SIDE":5} {"QUALITY":7} CHECK', curses.A_DIM)
+            rows = max(1, (h-11)//2)
             start = max(0, self.fi-rows+1)
-            for y, feed in enumerate(fs[start:start+rows], 6):
-                selected = start+y-6 == self.fi
-                side = feed.side.upper() if feed.side != 'unknown' else '?'
-                kind = {'ppv':'PLAY*', 'sf':'PLAY', 'direct':'PLAY', 'web':'WEB', 'candidate':'TRY'}[feed.kind]
+            for index, feed in enumerate(fs[start:start+rows]):
+                y = 6 + index*2
+                selected = start+index == self.fi
                 history = self.config.get('health') if isinstance(self.config.get('health'), dict) else {}
-                grade = grading.summary(history.get(grading.source_key(feed), {}))
-                mark = f' [{grade}]' if grade else ''
-                auto = self.auto_checks.get(id(feed))
-                check = f' [{auto}]' if auto else ''
-                side_label = f'[{side:7}] ' if self.feed_context == 'live' else ''
-                self.put(y, 2, f'{">" if selected else " "} {side_label}[{kind}]{check}{mark} {feed.source}: {feed.label}', curses.A_REVERSE if selected else 0)
+                view = describe_feed(feed, history.get(grading.source_key(feed), {}), self.auto_checks.get(id(feed)))
+                short_name = view.name if len(view.name) <= name_width else view.name[:name_width-1] + '…'
+                attr = curses.A_REVERSE if selected else 0
+                self.put(y, 2, f'{">" if selected else " "} {short_name:<{name_width}}  {view.side:5} {view.quality:7} {view.check}', attr)
+                if y+1 < h-5:
+                    fallback = {'ppv':'Uses local resolver', 'web':'Browser-only; no media URL'}.get(feed.kind, 'Direct stream')
+                    detail = view.detail or fallback
+                    if feed.kind == 'web' and view.detail: detail = fallback + ' | ' + view.detail
+                    if short_name != view.name: detail = view.name + ' | ' + detail
+                    self.put(y+1, 4, detail, attr if selected else curses.A_DIM)
             if not fs:
                 self.put(6, 2, 'Looking for streams...' if self.feed_pending else 'No available feeds. Refresh near game time or change the filter.')
             self.put(h-5, 1, 'Enter play   / search   t test   g rank   o source')
@@ -780,6 +868,136 @@ class App:
         self.games = [g for g in self.all_games if query in (g.title + ' ' + g.home + ' ' + g.away).lower()]
         self.gi = min(self.gi, max(0, len(self.games)-1))
 
+    def update_global_search(self):
+        today = default_day()
+        query = smart_search.parse_query(self.search_query, today)
+        self.search_plan = smart_search.make_plan(self.search_index, query)
+        query = self.search_plan.query
+        work, sources = [], {}
+        day = query.date or today
+        if query.intent != 'replay' and day >= today:
+            work.extend(('games', league, day) for league in self.search_plan.leagues)
+        if query.intent != 'live':
+            for league in self.search_plan.leagues:
+                for spec in replays.catalogs(league):
+                    key = ('replays', spec, '')
+                    sources.setdefault(key, []).append(league)
+                    if key not in work: work.append(key)
+            # A specific matchup/date can require searching beyond the recent catalog.
+            if (query.date or len(query.fragments) > 1) and self.search_plan.primary:
+                term = smart_search.archive_search_term(self.search_plan.primary)
+                for league in self.search_plan.leagues:
+                    for spec in replays.catalogs(league):
+                        host = urllib.parse.urlsplit(spec[1]).hostname
+                        if host not in ('basketball-video.com','nfl-video.com','fullmatchshows.com','watchreplay.net'):
+                            continue
+                        key = ('replays', spec, term)
+                        sources.setdefault(key, []).append(league)
+                        if key not in work: work.append(key)
+        self.search_sources = sources
+        self.search_work = work
+        self.search_needed = set(work)
+        self.search_due = time.monotonic() + .2 if work else None
+        self.search_position = 0; self.search_touched = False
+        self.rebuild_global_results()
+
+    def rebuild_global_results(self):
+        selected = (self.search_results[self.search_position].key if self.search_touched
+                    and self.search_position < len(self.search_results) else None)
+        games, archived = [], []
+        for key in self.search_work:
+            cached = self.search_cache.get(key)
+            if not cached or cached[2]: continue
+            if key[0] == 'games': games.extend(cached[1])
+            else:
+                archived.extend((league, item) for league in self.search_sources.get(key, ()) for item in cached[1])
+        self.search_results = smart_search.rank(self.search_index, self.search_plan, games, archived, default_day())
+        keys = [item.key for item in self.search_results]
+        if selected in keys:
+            self.search_position = keys.index(selected)
+        elif not self.search_touched:
+            self.search_position = 0
+        else:
+            self.search_position = min(self.search_position, max(0, len(keys)-1))
+        if self.mode != 'search': return
+        pending = sum(1 for key in self.search_needed
+                      if key in self.search_inflight or key not in self.search_cache)
+        count = sum(item.kind != 'team' for item in self.search_results)
+        if not self.search_query:
+            self.message = 'Start typing a team, matchup, or league.'
+        elif pending:
+            self.message = f'{count} games and replays found | searching {pending} sources...'
+        elif count:
+            self.message = f'{count} games and replays found. Choose one or keep typing.'
+        elif self.search_plan.leagues:
+            self.message = 'No matching games or replays found. Try another team or date.'
+        else:
+            self.message = 'Keep typing a team, matchup, or league.'
+
+    def start_global_search(self):
+        if self.mode != 'search': return
+        if self.search_due is None or time.monotonic() < self.search_due: return
+        self.search_due = None
+        if not self.search_workers_started:
+            self.search_workers_started = True
+            for _ in range(3):
+                threading.Thread(target=self.global_search_worker, daemon=True).start()
+        now = time.monotonic()
+        for key in self.search_work:
+            cached = self.search_cache.get(key)
+            if key in self.search_inflight or (cached and cached[0] > now): continue
+            self.search_inflight.add(key)
+            self.search_jobs.put(key)
+        self.rebuild_global_results()
+
+    def global_search_worker(self):
+        while True:
+            key = self.search_jobs.get()
+            if key is None: return
+            if key not in self.search_needed:
+                self.search_queue.put((key, None, None, True)); continue
+            try:
+                if key[0] == 'games': value = get_games(key[2], key[1])
+                else: value = replays.listing(key[1], key[2])
+                self.search_queue.put((key, value, None, False))
+            except Exception as exc:
+                self.search_queue.put((key, [], type(exc).__name__, False))
+
+    def poll_global_search(self):
+        changed = False
+        while True:
+            try: key, value, error, canceled = self.search_queue.get_nowait()
+            except queue.Empty: break
+            self.search_inflight.discard(key)
+            if not canceled:
+                ttl = 20 if error else 60 if key[0] == 'games' else 300
+                self.search_cache[key] = (time.monotonic()+ttl, value, error)
+                while len(self.search_cache) > 96:
+                    self.search_cache.pop(next(iter(self.search_cache)))
+            elif key in self.search_needed:
+                self.search_due = time.monotonic()
+            changed = True
+        if changed: self.rebuild_global_results()
+        return changed
+
+    def open_global_result(self):
+        if not self.search_results: return
+        hit = self.search_results[self.search_position]
+        if hit.kind == 'team':
+            self.search_query = hit.item.display
+            self.update_global_search()
+            return
+        self.league = hit.league
+        self.search_return = None
+        self.feed_return = 'search'
+        self.filter = 'all'; self.provider_filter = 'all'; self.feed_search = ''
+        if hit.kind == 'replay':
+            self.current_replay = hit.item; self.feed_context = 'replay'
+        else:
+            self.games = [hit.item]; self.all_games = [hit.item]; self.gi = 0
+            self.day = hit.date or self.day; self.feed_context = 'live'
+        self.mode = 'feeds'; self.refresh_feeds()
+
     def refresh_replays(self):
         self.replay_generation += 1
         generation = self.replay_generation
@@ -797,6 +1015,8 @@ class App:
     def poll_replays(self):
         active = (self.mode == 'replays' or (self.mode == 'feeds' and self.feed_context == 'replay')
                   or (self.mode == 'leagues' and self.league_return == 'replays')
+                  or (self.mode == 'search' and (self.search_return == 'replays'
+                      or (self.search_return == 'feeds' and self.feed_context == 'replay')))
                   or (self.mode == 'help' and (self.help_return == 'replays'
                       or (self.help_return == 'feeds' and self.feed_context == 'replay')
                       or (self.help_return == 'leagues' and self.league_return == 'replays'))))
@@ -847,6 +1067,7 @@ class App:
 
     def poll_feeds(self):
         active = (self.mode == 'feeds' or (self.mode == 'leagues' and self.league_cancel == 'feeds')
+                  or (self.mode == 'search' and self.search_return == 'feeds')
                   or (self.mode == 'help' and (self.help_return == 'feeds'
                       or (self.help_return == 'leagues' and self.league_cancel == 'feeds'))))
         changed = False
@@ -1055,18 +1276,43 @@ class App:
             except OSError as exc:
                 self.message = f'Could not start Celluloid: {type(exc).__name__}'
             return
-        self.message = 'Starting mpv. Press q in mpv to return.'; self.render()
+        intervals, ad_note = [], ''
+        if self.ad_mute:
+            if self.feed_context == 'replay':
+                self.message = 'Checking replay for explicit ad markers...'; self.render()
+                try:
+                    intervals = ad_mute.marked_replay_intervals(url, headers)
+                except (OSError, ValueError, TypeError):
+                    pass
+                if not intervals: ad_note = ' No marked ads found; ad mute was inactive.'
+            else:
+                ad_note = ' Ad mute is available only for marked replays.'
+        temporary, monitor = None, None
+        command = mpv_command(url, headers, cache=self.cache, terminal_video=self.terminal_video)
+        if intervals:
+            try:
+                temporary = tempfile.TemporaryDirectory(prefix='sports-mpv-', dir='/tmp')
+                socket_path = os.path.join(temporary.name, 'mpv.sock')
+                monitor = ad_mute.Monitor(socket_path, intervals)
+                monitor.start()
+                command.insert(1, '--input-ipc-server=' + socket_path)
+            except OSError:
+                if temporary: temporary.cleanup(); temporary = None
+                ad_note = ' Ad mute could not start.'
+        self.message = 'Starting mpv. Press q in mpv to return.' + ad_note; self.render()
         curses.def_prog_mode(); curses.endwin()
         try:
-            result = subprocess.run(mpv_command(url, headers, cache=self.cache, terminal_video=self.terminal_video), check=False)
+            result = subprocess.run(command, check=False)
             if result.returncode == 0:
-                self.message = 'Returned from mpv.'
+                self.message = 'Returned from mpv.' + ad_note
             else:
                 self.hide_feed(feed)
                 self.message = f'mpv exited with status {result.returncode}; feed hidden until refresh.'
         except OSError as e:
             self.message = f'Could not start mpv: {e}'
         finally:
+            if monitor: monitor.stop()
+            if temporary: temporary.cleanup()
             curses.reset_prog_mode(); self.scr.refresh()
 
     def test_feed(self, feed):
@@ -1102,6 +1348,8 @@ class App:
             self.message = f'Segment reachable in {record["latency_ms"]} ms | {label}'
 
     def close(self):
+        if self.search_workers_started:
+            for _ in range(3): self.search_jobs.put(None)
         if self.relay: self.relay.close()
         if self.resolver_owned and self.helper and self.helper.poll() is None:
             self.helper.terminate()
@@ -1129,8 +1377,40 @@ class App:
         if self.mode == 'games': self.refresh_games()
         try:
             while True:
-                self.poll_replays(); self.poll_feeds(); self.poll_auto_checks(); self.poll_gui_players(); self.render(); key = self.scr.getch()
+                self.poll_global_search(); self.start_global_search()
+                self.poll_replays(); self.poll_feeds(); self.poll_auto_checks(); self.poll_gui_players(); self.render(); key, typed = self.read_key()
                 if key == -1: continue
+                if self.mode == 'search':
+                    if key in (17, 24): break  # Ctrl-Q or Ctrl-X
+                    if key == ord('?'):
+                        self.help_return = 'search'; self.help_scroll = 0; self.mode = 'help'
+                        self.message = 'Controls and setup.'
+                    elif key in (curses.KEY_UP, 16):
+                        self.search_position = max(0, self.search_position-1); self.search_touched = True
+                    elif key in (curses.KEY_DOWN, 14):
+                        self.search_position = min(max(0, len(self.search_results)-1), self.search_position+1); self.search_touched = True
+                    elif key in (10, 13, curses.KEY_ENTER):
+                        self.open_global_result()
+                    elif key in (9, 27):
+                        if key == 27 and self.search_return:
+                            self.mode = self.search_return; self.search_return = None; self.message = 'Returned to list.'
+                        else:
+                            self.league_index = list(LEAGUES).index(self.league)
+                            self.league_cancel = 'search'; self.league_return = 'games'
+                            self.mode = 'leagues'; self.message = 'Choose a sport or league.'
+                    elif key in (curses.KEY_BACKSPACE, 127, 8):
+                        self.search_query = self.search_query[:-1]; self.update_global_search()
+                    elif key == 21:  # Ctrl-U
+                        self.search_query = ''; self.update_global_search()
+                    elif key == 18:  # Ctrl-R
+                        for work in self.search_needed: self.search_cache.pop(work, None)
+                        self.search_due = time.monotonic(); self.rebuild_global_results()
+                    elif typed:
+                        self.search_query += typed; self.update_global_search()
+                    continue
+                if key == 6:  # Ctrl-F searches from any view.
+                    self.search_return = self.mode; self.mode = 'search'; self.update_global_search()
+                    continue
                 if key in (ord('q'),): break
                 if self.mode == 'help':
                     if key in (ord('?'), 27, curses.KEY_BACKSPACE, 127, ord('h')):
@@ -1161,18 +1441,21 @@ class App:
                         if self.mode == 'replays': self.replay_search = ''; self.refresh_replays()
                         else: self.refresh_games()
                     elif self.mode == 'games' and self.games:
-                        self.feed_context = 'live'; self.mode = 'feeds'; self.filter = 'all'
+                        self.feed_return = None; self.feed_context = 'live'; self.mode = 'feeds'; self.filter = 'all'
                         self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
                     elif self.mode == 'replays' and self.replays:
                         self.current_replay = self.replays[self.ri]; self.replay_selection_touched = True
-                        self.feed_context = 'replay'; self.mode = 'feeds'; self.filter = 'all'
+                        self.feed_return = None; self.feed_context = 'replay'; self.mode = 'feeds'; self.filter = 'all'
                         self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
                     elif self.mode == 'feeds' and self.visible_feeds():
                         self.feed_selection_touched = True; self.play(self.visible_feeds()[self.fi])
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'feeds':
                     self.feed_generation += 1; self.feed_pending = 0
-                    self.mode = 'replays' if self.feed_context == 'replay' else 'games'
-                    self.message = 'Select a replay.' if self.mode == 'replays' else 'Select a game.'
+                    if self.feed_return == 'search':
+                        self.feed_return = None; self.mode = 'search'; self.rebuild_global_results()
+                    else:
+                        self.mode = 'replays' if self.feed_context == 'replay' else 'games'
+                        self.message = 'Select a replay.' if self.mode == 'replays' else 'Select a game.'
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'leagues':
                     if self.league_cancel is None:
                         self.message = 'Choose a sport or press q to quit.'
@@ -1195,10 +1478,8 @@ class App:
                     else: self.refresh_feeds()
                 elif self.mode == 'games' and key in (ord('['), ord(']')):
                     self.day += dt.timedelta(days=-1 if key == ord('[') else 1); self.gi = 0; self.refresh_games()
-                elif self.mode == 'games' and key == ord('/'):
-                    self.search = self.prompt('Team search (blank clears):'); self.apply_search(); self.message = f'{len(self.games)} games shown.'
-                elif self.mode == 'replays' and key == ord('/'):
-                    self.replay_search = self.prompt('Replay search (blank clears):'); self.refresh_replays()
+                elif self.mode in ('games', 'replays') and key == ord('/'):
+                    self.search_return = self.mode; self.mode = 'search'; self.search_query = ''; self.update_global_search()
                 elif self.mode == 'games' and key == ord('l') and self.league == 'nba':
                     self.search = '' if self.search.casefold() == 'lakers' else 'Lakers'
                     self.apply_search(); self.message = f'{len(self.games)} games shown.'
@@ -1284,9 +1565,10 @@ def main():
     parser = argparse.ArgumentParser(description='Browse sports games and choose streams.')
     parser.add_argument('--list', action='store_true', help='Print upcoming games and feed listings without a terminal UI')
     parser.add_argument('--date', help='Schedule date in YYYY-MM-DD (Eastern time)')
-    parser.add_argument('--league', choices=LEAGUES, help='Open a league directly (default: choose in the app; nba for --list)')
+    parser.add_argument('--league', choices=LEAGUES, help='Open a league directly (default: search in the app; nba for --list)')
     parser.add_argument('--addon', help='Stremio sports add-on manifest URL for this run')
     parser.add_argument('--resolver-dir', help='Local ppv-hls-proxy checkout for this run')
+    parser.add_argument('--ad-mute', action='store_true', help='Mute explicitly marked replay ad breaks in mpv for this run')
     args = parser.parse_args(); config = load_config()
     if args.addon: config['addon'] = args.addon
     if args.resolver_dir: config['resolver_dir'] = args.resolver_dir
@@ -1313,7 +1595,7 @@ def main():
         print('An interactive terminal is required; use --list for plain output.', file=sys.stderr); return 2
     try:
         def run_ui(screen):
-            app = App(screen, config)
+            app = App(screen, config, ad_mute_enabled=args.ad_mute)
             if args.league:
                 app.league = args.league
                 app.league_index = list(LEAGUES).index(args.league)
