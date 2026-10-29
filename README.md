@@ -1,12 +1,34 @@
-# NBA Live: terminal picker
+# Sports Live
 
-Browse NBA games by date and team, select a home or away broadcast, and launch it in `mpv`. The program retrieves one day's schedule first, then looks up streams only when you select a game. Feed availability and quality depend on the provider and your connection.
+Find a game or replay in your terminal, choose a source, and play it in mpv, IINA, or Celluloid. The app loads only the league and game you select, and shows source results as they arrive. Its compact browsing flow takes inspiration from [ani-cli](https://github.com/pystardust/ani-cli).
 
-## Setup
+Live schedules cover NBA, WNBA, NFL, NCAA football, men's and women's NCAA basketball, MLB, NHL, and soccer: MLS, Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Liga MX, and UEFA Champions League. Replays have a separate archive view.
 
-Install Python 3.9+ with `curses`, Node.js 20+ with npm, Git, and `mpv`. On macOS, `brew install mpv node`; on Ubuntu/Debian, `sudo apt install mpv nodejs npm git python3` (the Node package must be version 20 or newer). Other systems can use their package manager. Windows needs a terminal with Python's curses support, such as WSL.
+## Install
 
-Clone the repository and run:
+You need Python 3.9+ with `curses`, Git, and a player. Node.js 20+ and npm are needed for the optional PPV resolver installed by `setup.sh`.
+
+**macOS** — install mpv and Node with Homebrew:
+
+```sh
+brew install mpv node
+```
+
+For a native graphical player, also install [IINA](https://iina.io/):
+
+```sh
+brew install --cask iina
+```
+
+**Ubuntu / Debian** — install the dependencies:
+
+```sh
+sudo apt install git python3 mpv nodejs npm
+```
+
+Check `node --version`; if it is below 20, install a newer version from [Node.js](https://nodejs.org/). For a graphical player, optionally install [Celluloid](https://celluloid-player.github.io/) with `sudo apt install celluloid`. Other Linux distributions can use their own package manager. Windows requires a terminal with Python's curses support, such as WSL.
+
+**Then, on either system:**
 
 ```sh
 git clone https://github.com/osiddiki/nba-tui.git
@@ -15,29 +37,65 @@ cd nba-tui
 ./nba.py
 ```
 
-`setup.sh` installs the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) into `resolver/`, pinned to the revision tested here, and installs its dependencies. If the checkout is already present, it keeps it. The app starts that helper automatically on `127.0.0.1:38765`, resolves the selected feed, and closes the helper when the app exits. If that port is occupied by an existing helper the app uses it and leaves it running. The resolver relays video locally, so keep the app open during playback.
+The setup script installs a pinned copy of the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) in `resolver/`. You can run `./nba.py` without setup if you do not need PPV sources. To update an existing checkout later, run `git pull` and then `./nba.py`.
+
+## First run
+
+1. Press `S` to choose a league. Use `[` and `]` to change the schedule date, or `/` to search for a team. In the NBA list, `l` quickly filters for the Lakers.
+2. Select a game with the arrow keys or `j` / `k`, then press `Enter`. Sources appear as each directory responds. ESPN's completed games and sources explicitly marked offline are hidden.
+3. Select a source and press `Enter` to play. Press `o` to filter by provider, `f` to filter by broadcast side, or `/` to search sources and channels. Press `r` to refresh.
+4. On macOS, press `p` to switch between mpv and IINA. On Linux, `p` switches between mpv and Celluloid. The graphical player must be installed first.
+5. For past games, return to the game list and press `R`. Choose a league with `S`, search with `/`, choose a replay, then choose a server. Press `R` to return to live games.
+
+Press `?` at any time for the in-app controls. `Esc` goes back and `q` quits. The schedule date is in Eastern time; game times are displayed in your machine's local timezone.
+
+When using mpv, close its window or press `q` in mpv to return to the picker. IINA and Celluloid open separate windows, leaving the picker usable. **Keep the terminal app open while playing a local relay stream.**
 
 ## Controls
 
-- `↑` / `↓` or `j` / `k`: move; `Enter`: select a game or play a feed; `Esc`: return to games; `q`: quit.
-- `[` / `]`: previous / next NBA schedule date (Eastern time); `/`: search for a team; clear the search to see all games.
-- `r`: refresh the current schedule or stream list. Stream lists often appear close to tipoff.
-- `f`: cycle all, home, away, unknown, and (when applicable) Lakers feeds. The labels come from the provider; `?` means the broadcast is not identified.
-- `c`: cycle cache between 5, 15, and 30 seconds; `v`: switch between normal window and terminal video (`mpv --vo=tct`); `u`: play a pasted direct media URL.
-- `i`: resolve the selected source and display its current media URL and required headers. `a`: add/remove a sports Stremio add-on manifest; `s`: select a different local resolver checkout.
+| Key | Action |
+| --- | --- |
+| `↑` / `↓`, `j` / `k`, `Enter`, `Esc` | Move, select, or go back |
+| `S`, `[`, `]`, `/`, `l` | League, date, search, or Lakers shortcut |
+| `R` | Switch between the live schedule and replays |
+| `f`, `o`, `r` | Broadcast side, provider, or refresh |
+| `t`, `g`, `i` | Test a source, rank sources by checks, or inspect its media URL |
+| `p`, `c`, `v` | Player, cache size, or mpv terminal video |
+| `u`, `a`, `s` | Paste a media URL, configure an add-on, or select a PPV resolver |
+| `?`, `q` | Help or quit |
 
-Close mpv with `q` to return to the picker. Use `./nba.py --list` for a plain-text schedule and stream list, or `./nba.py --date 2026-10-28` to open a particular NBA schedule date. The score and team schedule are sourced from ESPN; displayed game times use your machine's local timezone.
+Keys are case-sensitive. `./nba.py --list --league wnba` prints a plain-text schedule and the first game's streams. `./nba.py --league ncaaf` starts on college football; `./nba.py --date 2026-10-31` selects a schedule date. Run `./nba.py --help` for all league codes.
 
 ## Sources and options
 
-StreamFree sources are resolved to fresh HLS URLs when selected. Its player does not identify commentary sides, so those choices show `?`. PPV's index supplies home/away labels and uses the local PPV resolver. Each playlist is checked before mpv starts.
+### Live directories
 
-NBA Bite is a game-specific directory of multiple providers. NBA Monster is another source listed by [FMHY](https://fmhy.net/video#live-tv-sports). Their entries appear as `TRY`: the program follows supported embedded players and tries to extract a playable URL when you select one. Unsupported or unavailable players report an error in the app, rather than opening a browser. Some providers return wrapped video segments and short-lived playlist tokens; for those the app runs a session-only relay on `127.0.0.1` that refreshes tokens and gives mpv a normal HLS stream. Keep the app open during playback. The displayed local URL is valid only while the app is running.
+| Source | Coverage and behavior |
+| --- | --- |
+| StreamFree | Multiple sports; sources marked not live are omitted and fresh playlist URLs are resolved on selection. |
+| PPV | Multiple sports and broadcast labels; uses the local PPV resolver. |
+| NTV | Multiple sports and event-specific servers; some channels require the app's local relay. |
+| NBA Bite, NBA Monster | Additional NBA directories; individual embedded players are resolved when selected. |
+| Sports add-on | Optional compatible Stremio manifest configured with `a`; results depend on the add-on. |
 
-Directory names, quality, language and broadcast labels come from their listings and may be inaccurate. Where a channel matches a single home or away broadcaster on the schedule, the app labels the corresponding side; otherwise it shows `?`. Streams may be unavailable before tipoff or during a game, and one listing may duplicate another.
+`PLAY` indicates a supported direct or resolver-backed source. `TRY` is a directory listing whose player must still be resolved. `?` for broadcast side means the directory did not identify home or away. Labels can be wrong and directories can list the same stream more than once. Sources that do not report live status may still be unavailable.
 
-For more direct stream options, configure a compatible sports add-on with `a`. One option is [Sports Streams](https://sports.highfly.to/configure): complete its one-time verification on its page and copy its manifest URL into the app. The app queries compatible basketball/sports catalogs and adds direct media URLs to the picker. Add-on streams, sides, and availability depend on that service; the unconfigured public manifest does not return playable streams. You can also pass a manifest for one run with `./nba.py --addon 'https://…/manifest.json'`. Add-on URLs may contain access tokens, so the config file is created with owner-only permissions at `${XDG_CONFIG_HOME:-~/.config}/nba-tui/config.json`.
+If resolution, a test, or mpv playback fails, the source is hidden for the current list. Press `r` to fetch the list again. A missing local dependency is reported without hiding the source. Some players use short-lived tokens or wrapped video segments; the session-only relay on `127.0.0.1` refreshes tokens and supplies normal HLS to the player. Its URLs stop working when the app exits.
 
-For a different resolver checkout, press `s` and enter its folder, or use `./nba.py --resolver-dir /path/to/ppv-hls-proxy`. Run `npm install` inside it first. To play direct links you already have, press `u` in a game's stream view. The app does not decrypt DRM-protected streams.
+### Replays
 
-No provider can guarantee uninterrupted, high-quality playback for every game. Try another feed or increase the cache if a stream stutters. If a source fails, refresh the game or use another source; providers and their APIs can change without notice.
+The replay view uses Basketball Replays and Basketball Video for basketball, NFL Video for football, FullMatchShows for soccer, and WatchReplay for MLB and NHL. It fetches listings only for the selected league and looks up servers only after you select a replay. Soccer replay listings can include multiple competitions. Search depends on each directory; when a site blocks search, the app filters its recent listings instead. Coverage and playable server support vary, and a full match may be listed as separate parts. More replay indexes are listed by [FMHY](https://fmhy.net/video#sports-replays).
+
+### Source checks and ranking
+
+Press `t` to resolve the selected source and read part of one segment from your connection. The app shows video height when it can determine it from the playlist or an optional `ffprobe` installation. This is a point-in-time check, not a sustained playback or buffering test.
+
+The last 20 checks are stored per provider, server, or channel. After at least three tests, A, B, C, and D correspond to success rates of at least 90%, 70%, 50%, and below 50%; fewer tests show `?`. The adjacent count shows the number of successful and total checks. Press `g` to rank tested sources by these results.
+
+### Add-ons and resolver
+
+Press `a` to configure a compatible sports Stremio add-on. For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./nba.py --addon 'https://…/manifest.json'`.
+
+The PPV helper runs only when needed on `127.0.0.1:38765` and is closed on exit if the app started it. To use a different checkout, press `s` or pass `--resolver-dir /path/to/ppv-hls-proxy`; run `npm install` in that checkout first. Settings are saved with owner-only permissions in `${XDG_CONFIG_HOME:-~/.config}/nba-tui/config.json`. Source-check history does not store media URLs or tokens. The app does not decrypt DRM-protected streams.
+
+Streams and archives change frequently. Try another source or increase the cache with `c` if playback stalls. For development and agent setup, see [AGENTS.md](AGENTS.md).

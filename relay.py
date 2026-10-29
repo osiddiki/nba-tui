@@ -22,8 +22,19 @@ def _download(url, referer, timeout=15, limit=MAX_SEGMENT):
     origin = urllib.parse.urlsplit(referer)
     headers = {'User-Agent': UA, 'Referer': referer, 'Origin': f'{origin.scheme}://{origin.netloc}', 'Accept':'*/*'}
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as res:
-        data = res.read(limit + 1)
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                data = res.read(limit + 1)
+            break
+        except urllib.error.HTTPError as exc:
+            # A rejected playlist token is handled separately by Relay.get.
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 2:
+                raise
+        time.sleep(.2 * (attempt + 1))
     if len(data) > limit: raise ValueError('response too large')
     return data
 
@@ -129,7 +140,11 @@ class Relay:
 
     def add(self, url, edge, channel, referer):
         sid = secrets.token_urlsafe(18)
-        with self.lock: self.sessions[sid] = {'url':url, 'edge':edge, 'channel':channel, 'referer':referer, 'token':'', 'expires':0, 'token_lock':threading.Lock()}
+        with self.lock:
+            self.sessions[sid] = {'url':url, 'edge':edge, 'channel':channel, 'referer':referer,
+                                  'token':'', 'expires':0, 'token_lock':threading.Lock(),
+                                  'playlist_lock':threading.Lock(), 'cached_playlist':None,
+                                  'cached_until':0}
         return self.base + '/playlist/' + sid + '.m3u8'
 
     def playlist_token(self, session):
@@ -142,14 +157,15 @@ class Relay:
             session['token'] = str(token); session['expires'] = time.time() + max(5, min(50, int(data.get('ttl') or 120)//2))
             return session['token']
 
-    def get(self, path):
-        path = urllib.parse.urlsplit(path).path
-        if path.startswith('/playlist/') and path.endswith('.m3u8'):
-            sid = path[len('/playlist/'):-len('.m3u8')]
-            session = self.sessions.get(sid)
-            if not session: raise ValueError('unknown stream')
+    def get_playlist(self, sid, session):
+        # Players may open the same playlist several times at once. Serializing
+        # refreshes prevents one rejected token from invalidating a newer token
+        # that another request is already using.
+        with session['playlist_lock']:
+            if session['cached_playlist'] is not None and time.monotonic() < session['cached_until']:
+                return session['cached_playlist'], 'application/vnd.apple.mpegurl'
             src = session['url']
-            for attempt in range(2):
+            for attempt in range(3):
                 token = self.playlist_token(session)
                 query = urllib.parse.urlencode({'t':token, '_':int(time.time()*1000)})
                 try:
@@ -157,10 +173,11 @@ class Relay:
                     break
                 except urllib.error.HTTPError as exc:
                     # This provider explicitly refreshes rejected, short-lived playlist tokens.
-                    if exc.code != 403 or attempt:
+                    if exc.code != 403 or attempt == 2:
                         raise
                     with session['token_lock']:
                         session['expires'] = 0
+                    time.sleep(.2 * (attempt + 1))
             if not text.lstrip().startswith('#EXTM3U'): raise ValueError('invalid playlist')
             if '#EXT-X-KEY:' in text and 'METHOD=NONE' not in text: raise ValueError('encrypted playlist is unsupported')
             output = []
@@ -173,7 +190,18 @@ class Relay:
                         self.resources[key] = (target, session['referer'])
                     output.append(self.base+'/segment/'+key+'.ts')
                 else: output.append(line)
-            return ('\n'.join(output)+'\n').encode(), 'application/vnd.apple.mpegurl'
+            playlist = ('\n'.join(output)+'\n').encode()
+            session['cached_playlist'] = playlist
+            session['cached_until'] = time.monotonic() + 1.5
+            return playlist, 'application/vnd.apple.mpegurl'
+
+    def get(self, path):
+        path = urllib.parse.urlsplit(path).path
+        if path.startswith('/playlist/') and path.endswith('.m3u8'):
+            sid = path[len('/playlist/'):-len('.m3u8')]
+            session = self.sessions.get(sid)
+            if not session: raise ValueError('unknown stream')
+            return self.get_playlist(sid, session)
         if path.startswith('/segment/') and path.endswith('.ts'):
             key = path[len('/segment/'):-3]
             resource = self.resources.get(key)

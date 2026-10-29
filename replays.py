@@ -1,0 +1,135 @@
+"""Browse replay catalogs and resolve their listed servers on demand."""
+from __future__ import annotations
+
+import datetime as dt
+import re
+import urllib.parse
+from dataclasses import dataclass
+from html.parser import HTMLParser
+
+import providers
+
+
+@dataclass(frozen=True)
+class Replay:
+    source: str
+    title: str
+    url: str
+
+
+@dataclass(frozen=True)
+class ReplayServer:
+    label: str
+    url: str
+    referer: str
+
+
+def catalogs(league):
+    now = dt.datetime.now(dt.timezone.utc)
+    season = now.year if now.month >= 10 else now.year - 1
+    basketball = ('Basketball Video', f'https://basketball-video.com/{season}-{str(season+1)[-2:]}', 'nba')
+    if league == 'nba':
+        return [('Basketball Replays', 'https://basketballreplays.net/', 'nba'), basketball]
+    if league == 'wnba':
+        return [('Basketball Video', 'https://basketball-video.com/wnba-video-fulll', 'wnba')]
+    if league in ('ncaam', 'ncaaw'):
+        category = 'college_basketball_w' if league == 'ncaaw' else 'college_basketball_m'
+        return [('Basketball Video', 'https://basketball-video.com/college-basketball', category)]
+    if league == 'nfl': return [('NFL Video', 'https://nfl-video.com/', 'nfl')]
+    if league == 'ncaaf': return [('NFL Video', 'https://nfl-video.com/cfb/', 'college_football')]
+    if league in ('mlb', 'nhl'):
+        return [('WatchReplay', f'https://watchreplay.net/category/{league}/', league)]
+    if league in ('mls','epl','laliga','bundesliga','seriea','ligue1','ligamx','ucl'):
+        return [('FullMatchShows', 'https://fullmatchshows.com/', 'soccer')]
+    return []
+
+
+class _Links(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.current = None; self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            self.current = [dict(attrs).get('href', ''), '']
+
+    def handle_data(self, data):
+        if self.current is not None: self.current[1] += data
+
+    def handle_endtag(self, tag):
+        if tag == 'a' and self.current is not None:
+            self.links.append(self.current); self.current = None
+
+
+def listing(spec, query=''):
+    name, base, category = spec
+    parts = urllib.parse.urlsplit(base)
+    origin = f'{parts.scheme}://{parts.netloc}'
+    search_url = None
+    if query and parts.hostname in ('basketball-video.com', 'nfl-video.com'):
+        search_url = origin + '/search/?' + urllib.parse.urlencode({'q':query})
+    elif query and parts.hostname in ('fullmatchshows.com', 'watchreplay.net'):
+        search_url = origin + '/?' + urllib.parse.urlencode({'s':query})
+    try:
+        page, _ = providers.fetch_html(search_url or base, timeout=12)
+    except (OSError, ValueError):
+        if not search_url: raise
+        # Some sites disable search to automated clients; recent listings remain useful.
+        page, _ = providers.fetch_html(base, timeout=12)
+    parser = _Links(); parser.feed(page)
+    results, seen = [], set()
+    for href, title in parser.links:
+        title = ' '.join(title.split())
+        if not re.search(r'\bvs\b|\bversus\b', title, re.I): continue
+        if category == 'nba' and ('wnba' in title.lower() or not re.search(r'\bnba\b', title, re.I)): continue
+        if category == 'wnba' and not re.search(r'\bwnba\b', title, re.I): continue
+        if category.startswith('college_basketball'):
+            if not re.search(r'\b(?:college|ncaa)\b', title, re.I): continue
+            women = bool(re.search(r"\b(?:women|women's|womens)\b", title, re.I))
+            if women != (category == 'college_basketball_w'): continue
+        if category == 'nfl' and not re.search(r'\bnfl\b', title, re.I): continue
+        if category == 'college_football' and not re.search(r'\b(?:college|ncaa)\b', title, re.I): continue
+        if query and query.casefold() not in title.casefold(): continue
+        url = urllib.parse.urljoin(base, href)
+        if not providers.public_url(url) or urllib.parse.urlsplit(url).hostname != parts.hostname: continue
+        if url in seen: continue
+        seen.add(url); results.append(Replay(name, title, url))
+        if len(results) == 80: break
+    return results
+
+
+class _Servers(HTMLParser):
+    def __init__(self, page_url):
+        super().__init__(); self.page_url = page_url; self.servers = []; self.heading = ''; self.anchor = None
+
+    def add(self, label, target):
+        url = urllib.parse.urljoin(self.page_url, target or '')
+        if not providers.public_url(url): return
+        hostname = urllib.parse.urlsplit(url).hostname or ''
+        if hostname in ('youtube.com', 'www.youtube.com'): return
+        self.servers.append(ReplayServer(f'{label or "Server"} | {hostname}', url, self.page_url))
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'iframe' and attrs.get('src'):
+            self.add(self.heading or f'Server {len(self.servers)+1}', attrs['src'])
+        if tag == 'a' and set((attrs.get('class') or '').split()) & {'myButton','su-button'}:
+            self.anchor = [attrs.get('href',''), '']
+
+    def handle_data(self, data):
+        text = ' '.join(data.split())
+        if re.search(r'\bserver\s*#?\s*\d+', text, re.I): self.heading = text[:70]
+        if self.anchor is not None: self.anchor[1] += data
+
+    def handle_endtag(self, tag):
+        if tag == 'a' and self.anchor is not None:
+            target, text = self.anchor; text = ' '.join(text.split())
+            self.add(self.heading if text.lower() == 'watch' else text, target)
+            self.anchor = None
+
+
+def servers(item):
+    page, final = providers.fetch_html(item.url, timeout=15)
+    parser = _Servers(final); parser.feed(page)
+    seen = set()
+    return [server for server in parser.servers[:40]
+            if not (server.url in seen or seen.add(server.url))]

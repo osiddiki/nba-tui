@@ -2,6 +2,7 @@
 from __future__ import annotations
 import html
 import ipaddress
+import json
 import re
 import urllib.parse
 import urllib.request
@@ -43,6 +44,27 @@ def fetch_html(url, referer=None, limit=1_500_000, timeout=15):
         data = r.read(limit+1); final = r.url
     if len(data) > limit: raise ValueError('page too large')
     return data.decode('utf8','replace'), final
+
+
+def vidara_stream(page, player_url):
+    """Use the replay player's own JSON endpoint when its page advertises it."""
+    parts = urllib.parse.urlsplit(player_url)
+    match = re.fullmatch(r'/e/([A-Za-z0-9_-]+)', parts.path)
+    if not match or '/api/stream' not in page or 'streaming_url' not in page:
+        return None
+    api = urllib.parse.urljoin(player_url, '/api/stream')
+    if not public_url(api):
+        raise ValueError('invalid player API URL')
+    origin = f'{parts.scheme}://{parts.netloc}'
+    payload = json.dumps({'filecode':match.group(1), 'device':'web', 'codecs':[]}).encode()
+    req = urllib.request.Request(api, data=payload, headers={'User-Agent':UA,
+        'Content-Type':'application/json', 'Accept':'application/json', 'Referer':player_url, 'Origin':origin})
+    with urllib.request.build_opener(PublicRedirect()).open(req, timeout=15) as response:
+        raw = response.read(500_001)
+    if len(raw) > 500_000: raise ValueError('player API response too large')
+    media = json.loads(raw).get('streaming_url', '')
+    if not public_url(media): raise ValueError('player did not return a public media URL')
+    return {'kind':'direct', 'url':media, 'referer':player_url}
 
 
 class CardParser(HTMLParser):
@@ -142,17 +164,24 @@ def extract_player(start_url, max_pages=8, referer=None):
         if url in seen or not public_url(url): continue
         seen.add(url)
         host=urllib.parse.urlsplit(url).hostname or ''
-        if host in ('streamfree.top','strmfree.st') and '/embed/basketball/' in url:
-            variant=urllib.parse.urlsplit(url).path.rsplit('/',1)[-1]
+        path=urllib.parse.urlsplit(url).path
+        sf_match=re.fullmatch(r'/embed/(basketball|football|soccer|baseball|hockey)/([^/]+)',path)
+        if host in ('streamfree.top','strmfree.st') and sf_match:
+            category,variant=sf_match.groups()
             match=re.fullmatch(r'(.+?)(\d{3,4}p)(\d*)',variant)
             if match:
                 key,quality,_=match.groups()
-                return {'kind':'sf','url':SF_ROOT+'/embed/basketball/'+variant,'key':key,'quality':quality,'variant':variant}
+                return {'kind':'sf','url':SF_ROOT+'/embed/'+category+'/'+variant,'key':key,'quality':quality,'variant':variant,'category':category}
         if host in ('taifood-blog.asia','embedindia.st') and '/embed/' in url:
             return {'kind':'ppv','url':url}
         try: page, final = fetch_html(url,referer)
         except (OSError,ValueError) as exc:
             errors.append(type(exc).__name__); continue
+        try:
+            replay = vidara_stream(page, final)
+            if replay: return replay
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            errors.append(type(exc).__name__)
         # This player's playlists expire quickly and segments are wrapped in images.
         src=re.search(r'\bconst\s+SRC\s*=\s*["\']([^"\']+)["\']',page)
         edge=re.search(r'\bconst\s+EDGE\s*=\s*["\']([^"\']+)["\']',page)
