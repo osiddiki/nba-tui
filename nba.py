@@ -56,13 +56,13 @@ RESOLVER = 'http://127.0.0.1:38765'
 CONFIG = pathlib.Path(os.environ.get('XDG_CONFIG_HOME', pathlib.Path.home() / '.config')) / 'nba-tui' / 'config.json'
 HELP_LINES = [
     'NAVIGATE       Up/Down or j/k: move    Enter: select    Esc: back',
-    'SCHEDULE       S: league    [ / ]: date    /: team search    l: Lakers',
-    'REPLAYS        R: replay archive    S: league    /: search titles',
+    'SCHEDULE       s: sport    [ / ]: date    /: team search    l: Lakers',
+    'REPLAYS        R: replay archive    s: sport    /: search titles',
     'SOURCES        f: broadcast side    o: provider    /: search choices',
     'CHECKS         t: test selected source    g: rank by your checks',
     'PLAYERS        p: player    c: cache    v: terminal video (mpv)',
     'MORE           i: show media URL    u: play a pasted media URL',
-    'SETUP          a: sports add-on    s: local PPV resolver',
+    'SETUP          a: sports add-on    d: local PPV resolver',
     'REFRESH        r: reload current list    q: quit',
     'Finished games and explicitly offline sources are hidden from live lists.',
     'Keep this terminal open while playing a local relay stream.',
@@ -314,20 +314,20 @@ def request_text(url, *, headers=None, timeout=12, limit=1_000_000):
     return data.decode('utf-8', 'replace')
 
 
-def resolve_streamfree(feed):
+def resolve_streamfree(feed, *, timeout=12):
     key = feed.metadata['key']
     quality = feed.metadata['quality']
     variant = feed.metadata['variant']
     category = feed.metadata.get('category', 'basketball')
     embed_headers = {'Referer': f'{SF_ROOT}/player/{category}/{key}', 'Origin': SF_ROOT}
-    page = request_text(feed.url, headers=embed_headers)
+    page = request_text(feed.url, headers=embed_headers, timeout=timeout)
     match = re.search(r'const\s+_0x\s*=\s*(\{.*?\})\s*;', page, re.S)
     if not match:
         raise ValueError('StreamFree player did not provide playlist tokens')
     tokens = json.loads(match.group(1)).get(quality)
     if not isinstance(tokens, dict) or not all(key in tokens for key in ('_t', '_e', '_n')):
         raise ValueError('StreamFree playlist tokens are missing')
-    info = request(SF_ROOT + '/get-stream-key/' + urllib.parse.quote(key), headers=embed_headers)
+    info = request(SF_ROOT + '/get-stream-key/' + urllib.parse.quote(key), headers=embed_headers, timeout=timeout)
     if info.get('is_external') and info.get('external_url'):
         url = info['external_url']
         if not safe_url(url):
@@ -347,6 +347,29 @@ def check_playlist(url, headers=None):
         raise ValueError('Provider did not return an HLS playlist')
     if not any(line.strip() and not line.lstrip().startswith('#') for line in manifest.splitlines()):
         raise ValueError('Playlist has no media yet')
+    return manifest
+
+
+def streamfree_wraps_segments(url, manifest, headers):
+    """Detect StreamFree's PNG transport-stream chunks using a small segment sample."""
+    if any(tag in manifest for tag in ('#EXT-X-STREAM-INF', '#EXT-X-MAP', '#EXT-X-KEY', '#EXT-X-BYTERANGE')):
+        return False
+    segments = [line.strip() for line in manifest.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    if not segments: return False
+    segment = urllib.parse.urljoin(url, segments[-2] if len(segments) > 1 else segments[-1])
+    if not providers.public_url(segment): raise ValueError('Invalid StreamFree segment URL')
+    req = urllib.request.Request(segment, headers=headers)
+    with urllib.request.build_opener(providers.PublicRedirect()).open(req, timeout=8) as response:
+        sample = response.read(256)
+    if not sample.startswith(b'\x89PNG\r\n\x1a\n'): return False
+    pos = 8
+    while pos + 8 <= len(sample):
+        size = int.from_bytes(sample[pos:pos+4], 'big')
+        tag = sample[pos+4:pos+8]
+        if tag == b'tsDa': return True
+        if size > len(sample)-pos-12: break
+        pos += size+12
+    return False
 
 
 def addon_base(manifest):
@@ -552,6 +575,39 @@ def celluloid_command(executable, url, headers=None, *, cache=15):
     return cmd
 
 
+def quick_probe_feed(feed):
+    """Resolve a source and sample one segment without using shared player state."""
+    temporary_relay = None
+    try:
+        if feed.kind == 'sf':
+            url, headers = resolve_streamfree(feed, timeout=4)
+        elif feed.kind == 'direct':
+            url, headers = feed.url, feed.headers
+        elif feed.kind == 'candidate':
+            found = providers.extract_player(feed.url, max_pages=3,
+                                             referer=feed.metadata.get('referer'), timeout=4)
+            if found['kind'] == 'relay':
+                temporary_relay = relay.Relay()
+                url = temporary_relay.add(found['url'], found['edge'], found['channel'], found['referer'])
+                headers = {}
+            elif found['kind'] == 'sf':
+                source = Feed(feed.source, feed.label, feed.side, found['url'], 'sf',
+                              metadata={key:found[key] for key in ('key','quality','variant','category')})
+                url, headers = resolve_streamfree(source, timeout=4)
+            elif found['kind'] == 'direct':
+                ref = found['referer']; parts = urllib.parse.urlsplit(ref)
+                url = found['url']
+                headers = {'Referer':ref, 'Origin':parts.scheme+'://'+parts.netloc, 'User-Agent':UA}
+            else:
+                return None
+        else:
+            return None
+        grading.inspect_stream(url, headers, quick=True)
+        return True
+    finally:
+        if temporary_relay: temporary_relay.close()
+
+
 class App:
     def __init__(self, screen, config):
         self.scr, self.config = screen, config
@@ -561,11 +617,12 @@ class App:
         self.league = 'nba'
         self.league_index = 0
         self.league_return = 'games'
+        self.league_cancel = None
         self.search = ''
         self.feed_search = ''
         self.replay_search = ''
         self.gi = self.fi = self.ri = 0
-        self.mode = 'games'
+        self.mode = 'leagues'
         self.feed_context = 'live'
         self.current_replay = None
         self.help_return = 'games'
@@ -574,7 +631,7 @@ class App:
         self.loading_games = False
         self.filter = 'all'
         self.provider_filter = 'all'
-        self.message = 'Loading games...'
+        self.message = 'Choose a sport or league.'
         self.errors = []
         self.feed_queue = queue.Queue()
         self.feed_generation = 0
@@ -583,6 +640,9 @@ class App:
         self.feed_pending = 0
         self.feed_selection_touched = False
         self.hidden_feeds = set()
+        self.auto_checks = {}
+        self.auto_queue = queue.Queue()
+        self.auto_slots = threading.BoundedSemaphore(3)
         self.replay_queue = queue.Queue()
         self.replay_generation = 0
         self.replay_sections = {}
@@ -623,7 +683,7 @@ class App:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         self.put(0, 1, 'SPORTS LIVE', curses.A_BOLD)
-        heading = {'leagues':'Leagues', 'games':'Games', 'replays':'Replays', 'feeds':'Broadcasts', 'help':'Help'}
+        heading = {'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'feeds':'Broadcasts', 'help':'Help'}
         self.put(1, 1, heading.get(self.mode, ''), curses.A_BOLD)
         if h < 12 or w < 48:
             self.put(3, 1, 'Please enlarge your terminal to at least 48 x 12.')
@@ -641,7 +701,7 @@ class App:
             for y, key in enumerate(keys[start:start+rows], 3):
                 selected = start+y-3 == self.league_index
                 self.put(y, 2, f'{">" if selected else " "} {LEAGUES[key][0]}', curses.A_REVERSE if selected else 0)
-            self.put(h-3, 1, 'Enter select league   Esc back   ? help   q quit')
+            self.put(h-3, 1, 'Enter select   Esc back   ? help   q quit')
         elif self.mode == 'games':
             self.put(2, 1, f'{LEAGUES[self.league][0]}  |  {self.day:%a %b %d} (ET date)  |  search: {self.search or "all"}')
             rows = max(1, h-7)
@@ -654,7 +714,7 @@ class App:
                 self.put(y, 2, f'{">" if selected else " "} [{status:8}] {when}  {game.title}', attr)
             if not self.games:
                 self.put(4, 2, 'Loading schedule...' if self.loading_games else 'No upcoming or live games. Change date or search.')
-            self.put(h-4, 1, 'Enter streams   R replays   S league   [ ] date')
+            self.put(h-4, 1, 'Enter streams   R replays   s sport   [ ] date')
             self.put(h-3, 1, '/ search   l Lakers   r refresh   ? help   q quit')
         elif self.mode == 'replays':
             self.put(2, 1, f'{LEAGUES[self.league][0]}  |  recent replays  |  search: {self.replay_search or "all"}')
@@ -665,7 +725,7 @@ class App:
                 self.put(y, 2, f'{">" if selected else " "} [{item.source}] {item.title}', curses.A_REVERSE if selected else 0)
             if not self.replays:
                 self.put(4, 2, 'Searching replay catalogs...' if self.replay_pending else 'No replays found. Try another search or league.')
-            self.put(h-4, 1, 'Enter servers   S league   / search   r refresh')
+            self.put(h-4, 1, 'Enter servers   s sport   / search   r refresh')
             self.put(h-3, 1, 'R live games   ? help   q quit')
         else:
             if self.feed_context == 'replay':
@@ -688,13 +748,15 @@ class App:
                 history = self.config.get('health') if isinstance(self.config.get('health'), dict) else {}
                 grade = grading.summary(history.get(grading.source_key(feed), {}))
                 mark = f' [{grade}]' if grade else ''
+                auto = self.auto_checks.get(id(feed))
+                check = f' [{auto}]' if auto else ''
                 side_label = f'[{side:7}] ' if self.feed_context == 'live' else ''
-                self.put(y, 2, f'{">" if selected else " "} {side_label}[{kind}]{mark} {feed.source}: {feed.label}', curses.A_REVERSE if selected else 0)
+                self.put(y, 2, f'{">" if selected else " "} {side_label}[{kind}]{check}{mark} {feed.source}: {feed.label}', curses.A_REVERSE if selected else 0)
             if not fs:
                 self.put(6, 2, 'Looking for streams...' if self.feed_pending else 'No available feeds. Refresh near game time or change the filter.')
             self.put(h-5, 1, 'Enter play   / search   t test   g rank   o source')
-            self.put(h-4, 1, 'f side   i inspect   p player   r refresh   ? help')
-            self.put(h-3, 1, 'c cache   v video   u URL   Esc back   q quit')
+            self.put(h-4, 1, 'f side   i inspect   p player   s sport   r refresh')
+            self.put(h-3, 1, 'c cache   v video   u URL   ? help   Esc back   q quit')
         self.put(h-1, 1, self.message)
         self.scr.refresh()
 
@@ -771,6 +833,7 @@ class App:
             tasks = feed_tasks(self.games[self.gi], dict(self.config))
         self.feeds = []; self.errors = []; self.fi = 0
         self.hidden_feeds.clear()
+        self.auto_checks.clear()
         self.feed_sections = {}; self.feed_order = [name for name, _ in tasks]
         self.feed_pending = len(tasks); self.feed_selection_touched = False
         self.message = 'Checking sources...'
@@ -783,27 +846,57 @@ class App:
             threading.Thread(target=worker, daemon=True).start()
 
     def poll_feeds(self):
+        active = (self.mode == 'feeds' or (self.mode == 'leagues' and self.league_cancel == 'feeds')
+                  or (self.mode == 'help' and (self.help_return == 'feeds'
+                      or (self.help_return == 'leagues' and self.league_cancel == 'feeds'))))
         changed = False
         while True:
             try: generation, name, feeds, error = self.feed_queue.get_nowait()
             except queue.Empty: break
-            if generation != self.feed_generation or not (self.mode == 'feeds' or (self.mode == 'help' and self.help_return == 'feeds')): continue
+            if generation != self.feed_generation or not active: continue
             visible = self.visible_feeds()
             selected = visible[self.fi] if self.feed_selection_touched and self.fi < len(visible) else None
             self.feed_sections[name] = feeds
             self.feed_pending = max(0, self.feed_pending-1)
             if error: self.errors.append(f'{name}: {error}')
             self.feeds = [feed for source in self.feed_order for feed in self.feed_sections.get(source, [])]
+            self.start_auto_checks(generation, feeds)
             visible = self.visible_feeds()
             if selected is not None and selected in visible:
                 self.fi = visible.index(selected)
             else:
                 self.fi = 0 if selected is None else min(self.fi, max(0, len(visible)-1))
             changed = True
-        if changed:
+        if changed and self.mode == 'feeds':
             self.message = f'{len(self.feeds)} choices found'
             if self.feed_pending: self.message += f' | checking {self.feed_pending} sources...'
             elif self.errors: self.message += ' | ' + ', '.join(self.errors)
+        return changed
+
+    def start_auto_checks(self, generation, feeds):
+        for feed in [feed for feed in feeds if feed.kind in ('sf', 'direct', 'candidate')][:2]:
+            self.auto_checks[id(feed)] = 'checking'
+            def worker(feed=feed):
+                with self.auto_slots:
+                    if generation != self.feed_generation: return
+                    try:
+                        result = quick_probe_feed(feed)
+                        status = 'OK' if result else '?'
+                    except urllib.error.HTTPError as exc:
+                        status = f'HTTP {exc.code}'
+                    except Exception:
+                        status = '?'
+                    self.auto_queue.put((generation, feed, status))
+            threading.Thread(target=worker, daemon=True).start()
+
+    def poll_auto_checks(self):
+        changed = False
+        while True:
+            try: generation, feed, status = self.auto_queue.get_nowait()
+            except queue.Empty: break
+            if generation != self.feed_generation or id(feed) not in self.auto_checks: continue
+            self.auto_checks[id(feed)] = status
+            changed = True
         return changed
 
     def prompt(self, label, initial=''):
@@ -853,7 +946,7 @@ class App:
         if self.helper_running(): return
         directory = self.config.get('resolver_dir') or os.environ.get('NBA_RESOLVER_DIR', '') or str(pathlib.Path(__file__).resolve().parent / 'resolver')
         if not directory:
-            raise DependencyError('Set up the resolver and press s to select its folder; see README.')
+            raise DependencyError('Set up the resolver and press d to select its folder; see README.')
         entry = pathlib.Path(directory).expanduser() / 'src/server.js'
         if not entry.is_file() or not (entry.parent.parent / 'node_modules').is_dir():
             raise DependencyError('Resolver or dependencies missing; see README.')
@@ -894,8 +987,20 @@ class App:
                 return url, headers
             url, headers = feed.url, feed.headers
         if feed.kind == 'sf':
-            url, headers = resolve_streamfree(feed)
-            check_playlist(url, headers)
+            for attempt in range(2):
+                try:
+                    url, headers = resolve_streamfree(feed)
+                    manifest = check_playlist(url, headers)
+                    wrapped = streamfree_wraps_segments(url, manifest, headers)
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code != 403 or attempt: raise
+            if wrapped:
+                if self.relay is None: self.relay = relay.Relay()
+                url = self.relay.add_streamfree(url, headers['Referer'],
+                                                lambda: resolve_streamfree(feed), manifest)
+                check_playlist(url)
+                return url, {}
         if feed.kind == 'ppv':
             self.ensure_helper()
             data = request(RESOLVER + '/api/embed', data={'iframe':feed.url}, timeout=35)
@@ -1021,10 +1126,10 @@ class App:
         except curses.error: pass
         self.scr.keypad(True)
         self.scr.timeout(150)
-        self.refresh_games()
+        if self.mode == 'games': self.refresh_games()
         try:
             while True:
-                self.poll_replays(); self.poll_feeds(); self.poll_gui_players(); self.render(); key = self.scr.getch()
+                self.poll_replays(); self.poll_feeds(); self.poll_auto_checks(); self.poll_gui_players(); self.render(); key = self.scr.getch()
                 if key == -1: continue
                 if key in (ord('q'),): break
                 if self.mode == 'help':
@@ -1050,6 +1155,8 @@ class App:
                 elif key in (10,13,curses.KEY_ENTER):
                     if self.mode == 'leagues':
                         self.league = list(LEAGUES)[self.league_index]
+                        if self.league_cancel == 'feeds':
+                            self.feed_generation += 1; self.feed_pending = 0
                         self.search = ''; self.gi = 0; self.mode = self.league_return
                         if self.mode == 'replays': self.replay_search = ''; self.refresh_replays()
                         else: self.refresh_games()
@@ -1067,14 +1174,19 @@ class App:
                     self.mode = 'replays' if self.feed_context == 'replay' else 'games'
                     self.message = 'Select a replay.' if self.mode == 'replays' else 'Select a game.'
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'leagues':
-                    self.mode = self.league_return; self.message = 'Select a league or item.'
+                    if self.league_cancel is None:
+                        self.message = 'Choose a sport or press q to quit.'
+                    else:
+                        self.mode = self.league_cancel; self.message = 'Returned to list.'
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h'), ord('R')) and self.mode == 'replays':
                     self.replay_generation += 1; self.replay_pending = 0
                     self.mode = 'games'; self.refresh_games()
-                elif self.mode in ('games', 'replays') and key == ord('S'):
+                elif self.mode in ('games', 'replays', 'feeds') and key in (ord('s'), ord('S')):
                     self.league_index = list(LEAGUES).index(self.league)
-                    self.league_return = self.mode
-                    self.mode = 'leagues'; self.message = 'Select a league.'
+                    self.league_cancel = self.mode
+                    self.league_return = 'replays' if (self.mode == 'replays' or
+                        (self.mode == 'feeds' and self.feed_context == 'replay')) else 'games'
+                    self.mode = 'leagues'; self.message = 'Choose a sport or league.'
                 elif self.mode == 'games' and key == ord('R'):
                     self.mode = 'replays'; self.replay_search = ''; self.refresh_replays()
                 elif self.mode in ('games', 'feeds', 'replays') and key == ord('r'):
@@ -1091,7 +1203,7 @@ class App:
                     self.search = '' if self.search.casefold() == 'lakers' else 'Lakers'
                     self.apply_search(); self.message = f'{len(self.games)} games shown.'
                 elif key == ord('a'): self.configure_addon()
-                elif key == ord('s'): self.configure_resolver()
+                elif key == ord('d'): self.configure_resolver()
                 elif self.mode == 'feeds' and key == ord('f') and self.feed_context == 'live':
                     filters = ['all','home','away','unknown'];
                     if self.games[self.gi].lakers_side: filters.insert(1, 'lakers')
@@ -1172,7 +1284,7 @@ def main():
     parser = argparse.ArgumentParser(description='Browse sports games and choose streams.')
     parser.add_argument('--list', action='store_true', help='Print upcoming games and feed listings without a terminal UI')
     parser.add_argument('--date', help='Schedule date in YYYY-MM-DD (Eastern time)')
-    parser.add_argument('--league', choices=LEAGUES, default='nba', help='League to show (default: nba)')
+    parser.add_argument('--league', choices=LEAGUES, help='Open a league directly (default: choose in the app; nba for --list)')
     parser.add_argument('--addon', help='Stremio sports add-on manifest URL for this run')
     parser.add_argument('--resolver-dir', help='Local ppv-hls-proxy checkout for this run')
     args = parser.parse_args(); config = load_config()
@@ -1180,9 +1292,10 @@ def main():
     if args.resolver_dir: config['resolver_dir'] = args.resolver_dir
     if args.list:
         try:
+            league = args.league or 'nba'
             day = dt.date.fromisoformat(args.date) if args.date else default_day()
-            games = get_games(day, args.league)
-            if not games: print(f'No live or upcoming {LEAGUES[args.league][0]} games found for that date.'); return 0
+            games = get_games(day, league)
+            if not games: print(f'No live or upcoming {LEAGUES[league][0]} games found for that date.'); return 0
             for i, game in enumerate(games, 1):
                 print(f'{i:2}. {game.start.astimezone():%Y-%m-%d %H:%M %Z}  {game.title}')
             g = next((game for game in games if game.lakers_side), games[0])
@@ -1201,7 +1314,10 @@ def main():
     try:
         def run_ui(screen):
             app = App(screen, config)
-            app.league = args.league
+            if args.league:
+                app.league = args.league
+                app.league_index = list(LEAGUES).index(args.league)
+                app.mode = 'games'
             if args.date: app.day = dt.date.fromisoformat(args.date)
             app.run()
         curses.wrapper(run_ui)

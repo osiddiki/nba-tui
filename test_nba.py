@@ -151,6 +151,56 @@ class DiscoveryTests(unittest.TestCase):
         png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',ihdr)+chunk(b'IDAT',zlib.compress(b'\x00'+rgb))+chunk(b'IEND',b'')
         self.assertEqual(relay.unwrap_segment(png),ts)
 
+    def test_streamfree_png_chunk_is_unwrapped_and_relayed(self):
+        ts = (b'\x47' + b'\x00'*187) * 3
+        def chunk(kind, value):
+            return struct.pack('>I',len(value)) + kind + value + struct.pack('>I',zlib.crc32(kind+value))
+        ihdr = struct.pack('>IIBBBBB',1,1,8,6,0,0,0)
+        png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR',ihdr) + chunk(b'IDAT',zlib.compress(b'\x00'*5)) + chunk(b'tsDa',ts) + chunk(b'IEND',b'')
+        self.assertEqual(relay.unwrap_segment(png), ts)
+        manifest = '#EXTM3U\n#EXTINF:4,\nsegment.png\n'
+        server = relay.Relay()
+        try:
+            url = server.add_streamfree('https://example.com/stream.m3u8', 'https://example.com/player',
+                                        lambda: ('https://example.com/fresh.m3u8',{}), manifest)
+            path = '/' + url.split('/', 3)[-1]
+            with patch.object(relay, '_download', return_value=png):
+                playlist, _ = server.get(path)
+                segment = next(line for line in playlist.decode().splitlines() if line.startswith('http'))
+                media, content_type = server.get('/' + segment.split('/', 3)[-1])
+            self.assertEqual(media, ts)
+            self.assertEqual(content_type, 'video/mp2t')
+        finally:
+            server.close()
+
+    def test_streamfree_detects_wrapped_segments_and_preserves_direct_streams(self):
+        def chunk(kind, value):
+            return struct.pack('>I',len(value)) + kind + value + struct.pack('>I',zlib.crc32(kind+value))
+        ihdr = struct.pack('>IIBBBBB',1,1,8,6,0,0,0)
+        png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR',ihdr) + chunk(b'IDAT',zlib.compress(b'\x00'*5)) + chunk(b'tsDa',(b'\x47'+b'\x00'*187)*3)
+        manifest = '#EXTM3U\n#EXTINF:4,\nsegment.png\n'
+        opener = SimpleNamespace(open=lambda *a, **kw: io.BytesIO(png))
+        with patch.object(nba.urllib.request, 'build_opener', return_value=opener):
+            self.assertTrue(nba.streamfree_wraps_segments('https://example.com/live.m3u8',manifest,{}))
+        opener = SimpleNamespace(open=lambda *a, **kw: io.BytesIO(b'\x47'+b'\x00'*187))
+        with patch.object(nba.urllib.request, 'build_opener', return_value=opener):
+            self.assertFalse(nba.streamfree_wraps_segments('https://example.com/live.m3u8',manifest,{}))
+
+    def test_streamfree_relay_renews_rejected_playlist_token(self):
+        server = relay.Relay()
+        denied = urllib.error.HTTPError('https://example.com/old.m3u8',403,'expired',{},None)
+        renewed = ('https://example.com/fresh.m3u8', {'Referer':'https://example.com/new-player'})
+        try:
+            url = server.add_streamfree('https://example.com/old.m3u8', 'https://example.com/player', lambda: renewed)
+            path = '/' + url.split('/',3)[-1]
+            with patch.object(relay, '_download', side_effect=[denied,b'#EXTM3U\n#EXTINF:4,\nsegment.png\n']) as download, \
+                 patch.object(relay.time, 'sleep'):
+                playlist, _ = server.get(path)
+            self.assertIn(b'/segment/',playlist)
+            self.assertEqual(download.call_args_list[1].args[:2], (renewed[0], renewed[1]['Referer']))
+        finally:
+            server.close()
+
     def test_progressive_loading_preserves_user_selection(self):
         slow_gate = threading.Event()
         fast_feed = nba.Feed('Fast', 'One', url='https://example.com/a', kind='direct')
@@ -160,6 +210,8 @@ class DiscoveryTests(unittest.TestCase):
             return [other_feed]
         app = nba.App(None,{})
         app.games = [self.game]; app.mode = 'feeds'
+        probe_patcher = patch.object(app, 'start_auto_checks')
+        probe_patcher.start(); self.addCleanup(probe_patcher.stop)
         try:
             # Slow source sorts first, but the fast one should appear immediately.
             with patch.object(nba, 'feed_tasks', return_value=[('Slow',slow),('Fast',lambda:[fast_feed])]):
@@ -203,6 +255,8 @@ class DiscoveryTests(unittest.TestCase):
     def test_failed_feed_is_hidden_until_refresh_but_missing_dependency_is_not(self):
         app = nba.App(None,{})
         app.games = [self.game]; app.mode = 'feeds'
+        probe_patcher = patch.object(app, 'start_auto_checks')
+        probe_patcher.start(); self.addCleanup(probe_patcher.stop)
         dead = nba.Feed('Source','Dead',url='https://example.com/a',kind='direct')
         good = nba.Feed('Source','Good',url='https://example.com/b',kind='direct')
         app.feeds = [dead,good]
@@ -223,6 +277,28 @@ class DiscoveryTests(unittest.TestCase):
             app.test_feed(good)
         self.assertEqual(app.visible_feeds(), [dead,good])
         self.assertEqual(app.message, 'Install resolver')
+
+    def test_automatic_checks_are_bounded_and_keep_transient_failures_visible(self):
+        app = nba.App(None,{})
+        app.games = [self.game]; app.mode = 'feeds'; app.feed_generation = 1
+        feeds = [nba.Feed('Source', name, url='https://example.com/' + name, kind='direct')
+                 for name in ('one', 'two', 'three')]
+        app.feeds = feeds
+        def probe(feed):
+            if feed.label == 'two':
+                raise urllib.error.HTTPError(feed.url, 403, 'forbidden', {}, None)
+            return True
+        with patch.object(nba, 'quick_probe_feed', side_effect=probe) as check:
+            app.start_auto_checks(1, feeds)
+            end = time.monotonic() + 1
+            while 'checking' in app.auto_checks.values() and time.monotonic() < end:
+                app.poll_auto_checks(); time.sleep(.01)
+        self.assertEqual(check.call_count, 2)
+        self.assertEqual(app.auto_checks[id(feeds[0])], 'OK')
+        self.assertEqual(app.auto_checks[id(feeds[1])], 'HTTP 403')
+        self.assertNotIn(id(feeds[2]), app.auto_checks)
+        self.assertEqual(app.visible_feeds(), feeds)
+        self.assertNotIn('health', app.config)
 
     def test_mpv_headers_are_arguments_not_shell_and_reject_injection(self):
         command = nba.mpv_command('https://example.com/a.m3u8',
@@ -323,7 +399,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_wnba_league_is_loaded_only_after_selection(self):
         class Screen:
-            def __init__(self): self.keys = iter([ord('S'), ord('r'), ord('j'), 10, ord('q')])
+            def __init__(self): self.keys = iter([ord('r'), ord('j'), 10, ord('q')])
             def keypad(self, value): pass
             def timeout(self, value): pass
             def getch(self): return next(self.keys)
@@ -331,7 +407,32 @@ class DiscoveryTests(unittest.TestCase):
         with patch.object(nba.curses, 'curs_set'), patch.object(app, 'render'), \
              patch.object(nba, 'get_games', return_value=[]) as fetch:
             app.run()
-        self.assertEqual([call.args[1] for call in fetch.call_args_list], ['nba', 'wnba'])
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], ['wnba'])
+
+    def test_lowercase_s_changes_sport_and_d_opens_resolver_settings(self):
+        class Screen:
+            def __init__(self): self.keys = iter([10, 10, ord('s'), 27, ord('d'), ord('q')])
+            def keypad(self, value): pass
+            def timeout(self, value): pass
+            def getch(self): return next(self.keys)
+        app = nba.App(Screen(), {})
+        modes = []
+        with patch.object(nba.curses, 'curs_set'), patch.object(app, 'render', side_effect=lambda: modes.append(app.mode)), \
+             patch.object(nba, 'get_games', return_value=[self.game]), patch.object(nba, 'feed_tasks', return_value=[]), \
+             patch.object(app, 'configure_resolver') as resolver:
+            app.run()
+        self.assertEqual(modes[0], 'leagues')
+        self.assertEqual(modes[-3:], ['leagues', 'feeds', 'feeds'])
+        resolver.assert_called_once()
+
+    def test_feed_loading_continues_while_sport_menu_is_open(self):
+        app = nba.App(None,{})
+        app.games = [self.game]; app.mode = 'leagues'; app.league_cancel = 'feeds'
+        app.feed_generation = 1; app.feed_pending = 1; app.feed_order = ['Source']
+        app.feed_queue.put((1, 'Source', [nba.Feed('Source','One')], None))
+        app.poll_feeds()
+        self.assertEqual([f.label for f in app.feeds], ['One'])
+        self.assertEqual(app.feed_pending, 0)
 
     def test_replay_catalog_and_servers_are_discovered_on_demand(self):
         catalog = '<a href="/lakers-replay">Lakers vs Blazers NBA Full Game Replay</a>' \
@@ -442,6 +543,10 @@ class DiscoveryTests(unittest.TestCase):
                 self.assertEqual(grading.inspect_stream(base+'/master.m3u8')['height'], 720)
                 with self.assertRaisesRegex(ValueError, 'Private media'):
                     grading.inspect_stream(base+'/private.m3u8')
+            fake_probe = SimpleNamespace(returncode=0, stdout=b'{"streams":[{"height":1}]}')
+            with patch.object(grading.shutil, 'which', return_value='ffprobe'), \
+                 patch.object(grading.subprocess, 'run', return_value=fake_probe):
+                self.assertIsNone(grading.inspect_stream(base+'/media.m3u8')['height'])
         finally:
             server.shutdown(); server.server_close(); thread.join()
         feed = nba.Feed('StreamFree','Source 1 | 1080p | live',url='https://example.com/secret')

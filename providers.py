@@ -46,7 +46,7 @@ def fetch_html(url, referer=None, limit=1_500_000, timeout=15):
     return data.decode('utf8','replace'), final
 
 
-def vidara_stream(page, player_url):
+def vidara_stream(page, player_url, *, timeout=15):
     """Use the replay player's own JSON endpoint when its page advertises it."""
     parts = urllib.parse.urlsplit(player_url)
     match = re.fullmatch(r'/e/([A-Za-z0-9_-]+)', parts.path)
@@ -59,7 +59,7 @@ def vidara_stream(page, player_url):
     payload = json.dumps({'filecode':match.group(1), 'device':'web', 'codecs':[]}).encode()
     req = urllib.request.Request(api, data=payload, headers={'User-Agent':UA,
         'Content-Type':'application/json', 'Accept':'application/json', 'Referer':player_url, 'Origin':origin})
-    with urllib.request.build_opener(PublicRedirect()).open(req, timeout=15) as response:
+    with urllib.request.build_opener(PublicRedirect()).open(req, timeout=timeout) as response:
         raw = response.read(500_001)
     if len(raw) > 500_000: raise ValueError('player API response too large')
     media = json.loads(raw).get('streaming_url', '')
@@ -156,7 +156,7 @@ class EmbedParser(HTMLParser):
             if re.fullmatch(r'\d{1,3}',ident): self.urls.append('https://watchfa.st/player-js/frame.php?id='+ident)
 
 
-def extract_player(start_url, max_pages=8, referer=None):
+def extract_player(start_url, max_pages=8, referer=None, *, timeout=15):
     """Follow player iframes and return a supported media source. No scripts are executed."""
     queue=[(start_url, referer or NBABITE+'/')]; seen=set(); errors=[]
     while queue and len(seen)<max_pages:
@@ -174,11 +174,11 @@ def extract_player(start_url, max_pages=8, referer=None):
                 return {'kind':'sf','url':SF_ROOT+'/embed/'+category+'/'+variant,'key':key,'quality':quality,'variant':variant,'category':category}
         if host in ('taifood-blog.asia','embedindia.st') and '/embed/' in url:
             return {'kind':'ppv','url':url}
-        try: page, final = fetch_html(url,referer)
+        try: page, final = fetch_html(url,referer,timeout=timeout)
         except (OSError,ValueError) as exc:
             errors.append(type(exc).__name__); continue
         try:
-            replay = vidara_stream(page, final)
+            replay = vidara_stream(page, final, timeout=timeout)
             if replay: return replay
         except (OSError, ValueError, TypeError, KeyError) as exc:
             errors.append(type(exc).__name__)

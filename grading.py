@@ -40,7 +40,7 @@ class _Redirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def inspect_stream(url, headers=None):
+def inspect_stream(url, headers=None, *, quick=False):
     """Check one playlist and segment; optionally probe the segment for resolution."""
     parts = urllib.parse.urlsplit(url)
     local_port = parts.port if parts.scheme == 'http' and parts.hostname in ('127.0.0.1', 'localhost') else None
@@ -55,9 +55,10 @@ def inspect_stream(url, headers=None):
 
     started = time.monotonic()
     current, resolution, probe_data = url, None, None
-    ffprobe = shutil.which('ffprobe')
+    ffprobe = None if quick else shutil.which('ffprobe')
+    timeout = 4 if quick else 10
     for _ in range(3):
-        with open_url(current, 10) as res:
+        with open_url(current, timeout) as res:
             data = res.read(1_000_001)
             current = res.geturl()
         if len(data) > 1_000_000:
@@ -74,7 +75,7 @@ def inspect_stream(url, headers=None):
                     variants.append((int(size.group(2)) if size else 0, lines[i + 1]))
         if variants:
             height, child = max(variants)
-            if height:
+            if height >= 144:
                 resolution = height
             current = urllib.parse.urljoin(current, child)
             continue
@@ -82,11 +83,13 @@ def inspect_stream(url, headers=None):
         if not segments:
             raise ValueError('No media segments available')
         segment = urllib.parse.urljoin(current, segments[-2] if len(segments) > 1 else segments[-1])
-        with open_url(segment, 12) as res:
+        with open_url(segment, timeout if quick else 12) as res:
             sample = res.read(512)
             latency_ms = round((time.monotonic() - started) * 1000)
             if not sample or sample.lstrip().lower().startswith((b'<html', b'<!doctype html')):
                 raise ValueError('Media segment unavailable')
+            if sample.startswith(b'\x89PNG\r\n\x1a\n') and b'tsDa' not in sample:
+                raise ValueError('Unsupported image-wrapped media segment')
             # Probe only a bounded portion of the chosen segment. ffprobe cannot
             # follow URLs embedded in an untrusted playlist from this input.
             if ffprobe:
@@ -102,7 +105,7 @@ def inspect_stream(url, headers=None):
             result = subprocess.run(command, input=probe_data, capture_output=True, timeout=12, check=False)
             if result.returncode == 0:
                 streams = json.loads(result.stdout).get('streams', [])
-                if streams and isinstance(streams[0].get('height'), int):
+                if streams and isinstance(streams[0].get('height'), int) and streams[0]['height'] >= 144:
                     resolution = streams[0]['height']
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass

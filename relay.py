@@ -72,6 +72,11 @@ def unwrap_segment(data):
                 if depth != 8 or ctype not in (2, 6) or interlace or width*height > 6_000_000:
                     raise ValueError('unsupported PNG format')
             elif tag == b'IDAT': chunks.append(payload)
+            elif tag == b'tsDa':
+                # StreamFree stores unmodified MPEG transport packets in a PNG chunk.
+                if len(payload) < 377 or len(payload) % 188 or any(payload[i] != 0x47 for i in (0, 188, 376)):
+                    raise ValueError('invalid transport stream in PNG')
+                return payload
             elif tag == b'IEND':
                 tail = data[pos:]
                 if len(tail) > 188 and tail[0] == 0x47 and tail[188] == 0x47: return tail
@@ -147,6 +152,14 @@ class Relay:
                                   'cached_until':0}
         return self.base + '/playlist/' + sid + '.m3u8'
 
+    def add_streamfree(self, url, referer, renew, initial_playlist=None):
+        sid = secrets.token_urlsafe(18)
+        with self.lock:
+            self.sessions[sid] = {'url':url, 'referer':referer, 'renew':renew,
+                                  'playlist_lock':threading.Lock(), 'cached_playlist':None,
+                                  'cached_until':0, 'kind':'streamfree', 'initial_playlist':initial_playlist}
+        return self.base + '/playlist/' + sid + '.m3u8'
+
     def playlist_token(self, session):
         with session['token_lock']:
             if time.time() < session['expires']: return session['token']
@@ -165,19 +178,30 @@ class Relay:
             if session['cached_playlist'] is not None and time.monotonic() < session['cached_until']:
                 return session['cached_playlist'], 'application/vnd.apple.mpegurl'
             src = session['url']
-            for attempt in range(3):
-                token = self.playlist_token(session)
-                query = urllib.parse.urlencode({'t':token, '_':int(time.time()*1000)})
-                try:
-                    text = _download(src + ('&' if '?' in src else '?') + query, session['referer'], limit=1_000_000).decode('utf8')
-                    break
-                except urllib.error.HTTPError as exc:
-                    # This provider explicitly refreshes rejected, short-lived playlist tokens.
-                    if exc.code != 403 or attempt == 2:
-                        raise
-                    with session['token_lock']:
-                        session['expires'] = 0
-                    time.sleep(.2 * (attempt + 1))
+            text = session.pop('initial_playlist', None)
+            if text is None:
+                for attempt in range(3):
+                    if session.get('kind') == 'streamfree':
+                        playlist_url = src
+                    else:
+                        token = self.playlist_token(session)
+                        query = urllib.parse.urlencode({'t':token, '_':int(time.time()*1000)})
+                        playlist_url = src + ('&' if '?' in src else '?') + query
+                    try:
+                        text = _download(playlist_url, session['referer'], limit=1_000_000).decode('utf8')
+                        break
+                    except urllib.error.HTTPError as exc:
+                        # Refresh a rejected, short-lived provider token.
+                        if exc.code != 403 or attempt == 2:
+                            raise
+                        if session.get('kind') == 'streamfree':
+                            src, headers = session['renew']()
+                            session['url'] = src
+                            session['referer'] = headers.get('Referer', session['referer'])
+                        else:
+                            with session['token_lock']:
+                                session['expires'] = 0
+                        time.sleep(.2 * (attempt + 1))
             if not text.lstrip().startswith('#EXTM3U'): raise ValueError('invalid playlist')
             if '#EXT-X-KEY:' in text and 'METHOD=NONE' not in text: raise ValueError('encrypted playlist is unsupported')
             output = []
