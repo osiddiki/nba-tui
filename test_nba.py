@@ -45,6 +45,28 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(len(feeds), 1)
         self.assertTrue(errors[0].startswith('StreamFree:'))
 
+    def test_streamfree_presents_each_source_and_resolves_fresh_tokens(self):
+        key = 'los-angeles-lakers-vs-la-clippers'
+        base = nba.SF_ROOT
+        source = f'https://strmfree.st/embed/basketball/{key}1080p2'
+        listing = {'streams': {'basketball': [{'name':'Lakers vs Clippers', 'stream_key':key,
+                                               'match_timestamp':int(self.start.timestamp())}]}}
+        def fake_request(url, **kwargs):
+            if '/api/v1/sources/' in url:
+                return {'sources':[source], 'live_sources':[source]}
+            if '/get-stream-key/' in url:
+                return {'server_name':'cdn'}
+            raise AssertionError(url)
+        page = 'const _0x = {"1080p":{"_t":"fresh","_e":123,"_n":"nonce"}};'
+        with patch.object(nba, 'request', side_effect=fake_request), patch.object(nba, 'request_text', return_value=page):
+            feed, = nba.sf_feeds(listing, self.game)
+            self.assertEqual(feed.label, 'Source 2 | 1080p | live')
+            self.assertEqual(feed.kind, 'sf')
+            url, headers = nba.resolve_streamfree(feed)
+        self.assertTrue(url.startswith(f'{base}/live-cdn/{key}1080p2/index.m3u8?'))
+        self.assertIn('_t=fresh', url)
+        self.assertEqual(headers['Referer'], f'{base}/embed/basketball/{key}1080p2')
+
     def test_mpv_headers_are_arguments_not_shell_and_reject_injection(self):
         command = nba.mpv_command('https://example.com/a.m3u8',
                                   {'Referer':'https://example.com/', 'Bad\nHeader':'x', 'X-Unsafe':'a\nb'})

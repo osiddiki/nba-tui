@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import curses
+import concurrent.futures
 import datetime as dt
 import json
 import os
@@ -25,6 +26,7 @@ UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537
 ESPN = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'
 PPV = 'https://api.ppv.st/api/streams'
 SF = 'https://streamfree.top/streams'
+SF_ROOT = 'https://streamfree.top'
 RESOLVER = 'http://127.0.0.1:38765'
 CONFIG = pathlib.Path(os.environ.get('XDG_CONFIG_HOME', pathlib.Path.home() / '.config')) / 'nba-tui' / 'config.json'
 
@@ -117,9 +119,10 @@ class Feed:
     label: str
     side: str = 'unknown'
     url: str = ''
-    kind: str = 'web'  # ppv: resolve at playback, direct: media URL, web: browser only
+    kind: str = 'web'  # Resolve sources on selection so short-lived links are fresh.
     headers: dict = field(default_factory=dict)
     note: str = ''
+    metadata: dict = field(default_factory=dict)
 
 
 def games_from_espn(data, now=None):
@@ -190,10 +193,71 @@ def sf_feeds(data, game):
             t = dt.datetime.fromtimestamp(int(event.get('match_timestamp', 0)), UTC)
         except (TypeError, ValueError, OverflowError, OSError):
             continue
-        if abs((t - game.start).total_seconds()) <= 6 * 3600:
-            # Its index is accessible even when a player's embed is unavailable.
-            out.append(Feed('StreamFree', 'Game listing', url='https://streamfree.top/', kind='web', note='find the game on this site; browser only'))
+        if abs((t - game.start).total_seconds()) > 6 * 3600:
+            continue
+        key = event.get('stream_key', '')
+        if not re.fullmatch(r'[a-zA-Z0-9_-]+', key):
+            continue
+        sources = request(SF_ROOT + '/api/v1/sources/' + urllib.parse.quote(key))
+        live = set(sources.get('live_sources') or [])
+        for source in sources.get('sources', [])[:20]:
+            parts = urllib.parse.urlsplit(source)
+            variant = parts.path.rsplit('/', 1)[-1]
+            match = re.fullmatch(re.escape(key) + r'(\d+p)(\d*)', variant)
+            if not match or not parts.path.startswith('/embed/basketball/'):
+                continue
+            quality, number = match.groups()
+            number = number or '1'
+            embed = SF_ROOT + parts.path
+            status = 'live' if source in live else 'not live yet'
+            out.append(Feed('StreamFree', f'Source {number} | {quality} | {status}', url=embed,
+                            kind='sf', metadata={'key': key, 'quality': quality, 'variant': variant}))
     return out
+
+
+def request_text(url, *, headers=None, timeout=12, limit=1_000_000):
+    h = {'User-Agent': UA, 'Accept': '*/*'}
+    if headers:
+        h.update(headers)
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as res:
+        data = res.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('Response too large')
+    return data.decode('utf-8', 'replace')
+
+
+def resolve_streamfree(feed):
+    key = feed.metadata['key']
+    quality = feed.metadata['quality']
+    variant = feed.metadata['variant']
+    embed_headers = {'Referer': f'{SF_ROOT}/player/basketball/{key}', 'Origin': SF_ROOT}
+    page = request_text(feed.url, headers=embed_headers)
+    match = re.search(r'const\s+_0x\s*=\s*(\{.*?\})\s*;', page, re.S)
+    if not match:
+        raise ValueError('StreamFree player did not provide playlist tokens')
+    tokens = json.loads(match.group(1)).get(quality)
+    if not isinstance(tokens, dict) or not all(key in tokens for key in ('_t', '_e', '_n')):
+        raise ValueError('StreamFree playlist tokens are missing')
+    info = request(SF_ROOT + '/get-stream-key/' + urllib.parse.quote(key), headers=embed_headers)
+    if info.get('is_external') and info.get('external_url'):
+        url = info['external_url']
+        if not safe_url(url):
+            raise ValueError('Invalid external stream URL')
+    else:
+        server = info.get('server_name') or 'origin'
+        route = 'live-externalcdn' if server == 'externalcdn' else 'live-cdn' if server != 'origin' else 'live'
+        query = urllib.parse.urlencode({k: tokens[k] for k in ('_t', '_e', '_n')})
+        url = f'{SF_ROOT}/{route}/{urllib.parse.quote(variant)}/index.m3u8?{query}'
+    headers = {'Referer': feed.url, 'Origin': SF_ROOT, 'User-Agent': UA}
+    return url, headers
+
+
+def check_playlist(url, headers=None):
+    manifest = request_text(url, headers=headers, timeout=10)
+    if not manifest.lstrip().startswith('#EXTM3U'):
+        raise ValueError('Provider did not return an HLS playlist')
+    if not any(line and not line.startswith('#') for line in manifest.splitlines()):
+        raise ValueError('Playlist has no media yet')
 
 
 def addon_base(manifest):
@@ -254,21 +318,22 @@ def addon_feeds(manifest, game):
 
 def fetch_feeds(game, config):
     out, errors = [], []
-    for name, url, parser in [('PPV', PPV, ppv_feeds), ('StreamFree', SF, sf_feeds)]:
-        try:
-            out.extend(parser(request(url), game))
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            errors.append(f'{name}: {type(e).__name__}')
+    tasks = [('StreamFree', lambda: sf_feeds(request(SF), game)),
+             ('PPV', lambda: ppv_feeds(request(PPV), game))]
     if config.get('addon'):
-        try:
-            out.extend(addon_feeds(config['addon'], game))
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            errors.append(f'Add-on: {type(e).__name__}')
+        tasks.append(('Add-on', lambda: addon_feeds(config['addon'], game)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = [(name, pool.submit(fn)) for name, fn in tasks]
+        for name, future in futures:
+            try:
+                out.extend(future.result())
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                errors.append(f'{name}: {type(e).__name__}')
     return out, errors
 
 
 def mpv_command(url, headers=None, *, cache=15, terminal_video=False):
-    cmd = ['mpv', '--force-window=yes', '--title=NBA Live', '--demuxer-lavf-o=allowed_extensions=ALL,allowed_segment_extensions=ALL,extension_picky=0', '--cache=yes', f'--cache-secs={cache}', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=' + str(cache)]
+    cmd = ['mpv', '--no-ytdl', '--force-window=yes', '--title=NBA Live', '--demuxer-lavf-o=allowed_extensions=ALL,allowed_segment_extensions=ALL,extension_picky=0', '--cache=yes', f'--cache-secs={cache}', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=' + str(cache)]
     if terminal_video:
         cmd.append('--vo=tct')
     for name, value in (headers or {}).items():
@@ -343,10 +408,10 @@ class App:
             for y, feed in enumerate(fs[start:start+rows], 6):
                 selected = start+y-6 == self.fi
                 side = feed.side.upper() if feed.side != 'unknown' else '?'
-                kind = {'ppv':'MPV* / WEB', 'direct':'MPV', 'web':'WEB'}[feed.kind]
+                kind = {'ppv':'MPV*', 'sf':'MPV', 'direct':'MPV', 'web':'WEB'}[feed.kind]
                 self.put(y, 2, f'{">" if selected else " "} [{side:7}] {feed.source:10} {feed.label} [{kind}]', curses.A_REVERSE if selected else 0)
             if not fs:
-                self.put(6, 2, 'No matching feeds. Try refresh near tipoff or change the filter.')
+                self.put(6, 2, 'Looking for streams...' if self.message == 'Checking sources...' else 'No matching feeds. Try refresh near tipoff or change the filter.')
             self.put(h-4, 1, 'Enter play   b browser   f filter   r refresh   Esc back')
             self.put(h-3, 1, 'c cache   v video   u URL   a add-on   s resolver   q quit')
         self.put(h-1, 1, self.message)
@@ -441,6 +506,13 @@ class App:
         if not shutil.which('mpv'):
             self.message = 'mpv is not installed or not on PATH.'; return
         url, headers = feed.url, feed.headers
+        if feed.kind == 'sf':
+            self.message = 'Getting a fresh stream link...'; self.render()
+            try:
+                url, headers = resolve_streamfree(feed)
+                check_playlist(url, headers)
+            except (OSError, ValueError, KeyError) as e:
+                self.message = f'Stream unavailable: {e}'; return
         if feed.kind == 'ppv':
             self.message = 'Resolving selected broadcast...'; self.render()
             try:
@@ -454,6 +526,7 @@ class App:
                 if u.hostname not in ('localhost','127.0.0.1') or u.port != 38765:
                     raise RuntimeError('Unexpected resolver URL')
                 headers = {}
+                check_playlist(url)
             except (OSError, ValueError, RuntimeError) as e:
                 self.message = f'Resolver failed: {e}'; return
         self.message = 'Starting mpv. Press q in mpv to return.'; self.render()

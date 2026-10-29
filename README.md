@@ -30,7 +30,7 @@ Close mpv with `q` to return to the picker. Use `./nba.py --list` for a plain-te
 
 ## Sources and options
 
-PPV's event index supplies the home/away choices. `Enter` on those choices uses the bundled local resolver and starts mpv. The StreamFree choice is a browser fallback, not an mpv stream; its site may restrict access or be unavailable. Streams may not be online before the game, and some nationally televised games may only offer a single broadcast. Provider labels do not prove that the audio is correct.
+PPV's event index supplies the home/away choices. `Enter` on those choices uses the bundled local resolver and starts mpv. If its upstream is down, a failed playlist is reported before mpv starts. StreamFree sources are listed separately and resolved to fresh HLS URLs when selected. The provider does not identify home/away commentary, so those choices appear with a question mark. Streams may not be online before the game, and some nationally televised games may only offer a single broadcast. Provider labels do not prove that the audio is correct.
 
 For more direct stream options, configure a compatible sports add-on with `a`. One option is [Sports Streams](https://sports.highfly.to/configure): complete its one-time verification on its page and copy its manifest URL into the app. The app queries compatible basketball/sports catalogs and adds direct media URLs to the picker. Add-on streams, sides, and availability depend on that service; the unconfigured public manifest does not return playable streams. You can also pass a manifest for one run with `./nba.py --addon 'https://…/manifest.json'`. Add-on URLs may contain access tokens, so the config file is created with owner-only permissions at `${XDG_CONFIG_HOME:-~/.config}/nba-tui/config.json`.
 
