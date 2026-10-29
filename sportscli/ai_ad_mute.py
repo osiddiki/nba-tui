@@ -140,7 +140,8 @@ class Decision:
             if self.ads >= 2: self.ad = True
         elif score >= .8:
             self.games += 1; self.ads = self.uncertain = 0
-            if self.games >= 2: self.ad = False
+            # Returning coverage should be audible on the first strong frame.
+            self.ad = False
         else:
             self.uncertain += 1; self.ads = self.games = 0
             if self.uncertain >= 3: self.ad = False
@@ -151,13 +152,22 @@ class PlaybackGate:
     """Count evidence only when the player is running and its timeline changes."""
     def __init__(self):
         self.position = None
+        self.sampled_at = None
+        self.discontinuity = False
 
     def accept(self, paused, position):
+        self.discontinuity = False
         if paused is not False or isinstance(position, bool) or not isinstance(position, (int, float)):
             return False
         if not math.isfinite(position): return False
         if self.position is not None and abs(position - self.position) < .05: return False
+        now = time.monotonic()
+        if self.position is not None:
+            elapsed = now - self.sampled_at
+            difference = position - self.position
+            self.discontinuity = difference < 0 or difference > max(5, elapsed * 3 + 1)
         self.position = position
+        self.sampled_at = now
         return True
 
 
@@ -210,61 +220,107 @@ class Monitor:
                     if time.monotonic() >= deadline: raise
                     self.stopped.wait(.1)
             else: return
-            reader = sock.makefile('rb'); request_id = 0
+            reader = sock.makefile('rb'); request_id = 0; playback_epoch = 0
             def invoke(*args):
-                nonlocal request_id
+                nonlocal request_id, playback_epoch
                 request_id += 1
                 sock.sendall((json.dumps({'command':args, 'request_id':request_id})+'\n').encode())
-                while not self.stopped.is_set():
+                deadline = time.monotonic() + 2
+                # Cleanup must still be able to use IPC after stop() is requested.
+                while time.monotonic() < deadline:
                     raw = reader.readline(100_000)
                     if not raw: raise OSError('mpv disconnected')
                     response = json.loads(raw)
+                    if response.get('event') in ('seek', 'start-file', 'file-loaded', 'end-file'):
+                        playback_epoch += 1
                     if response.get('request_id') == request_id: return response
-                raise OSError('stopped')
+                raise OSError('mpv did not respond')
             command = invoke
             if not self._read_worker(30).get('ready'): raise OSError('AI detector failed to load')
             command('show-text', 'Local NBA ad detection active' if self.mute else 'Ad detection preview: audio unchanged', 2000)
-            decision = Decision(); playback = PlaybackGate(); failures = 0
-            def unavailable_frame():
-                nonlocal failures, state, decision
-                failures += 1
-                if failures != 3: return
-                muted = command('get_property', 'mute')
-                if muted.get('error') != 'success' or not isinstance(muted.get('data'), bool):
-                    raise OSError('Could not read the player mute state')
-                if state.applied and muted['data']:
-                    if command('set_property', 'mute', False).get('error') != 'success':
+            decision = Decision(); playback = PlaybackGate(); failures = 0; seen_epoch = playback_epoch
+            manual_override = False
+            def reset_detection():
+                nonlocal state, decision, manual_override
+                if state.applied:
+                    muted = command('get_property', 'mute')
+                    if muted.get('error') != 'success' or not isinstance(muted.get('data'), bool):
+                        raise OSError('Could not read the player mute state')
+                    if not muted['data']: manual_override = True
+                    if muted['data'] and command('set_property', 'mute', False).get('error') != 'success':
                         raise OSError('Could not restore the player mute state')
                 state = MuteState(); decision = Decision()
-                command('show-text', 'Ad detection paused: frames unavailable', 3000)
+            def unavailable_frame():
+                nonlocal failures
+                failures += 1
+                reset_detection()
+                if failures == 3:
+                    command('show-text', 'Ad detection paused: frames unavailable', 3000)
             while not self.stopped.is_set():
                 started = time.monotonic()
                 paused = command('get_property', 'pause')
                 position = command('get_property', 'time-pos')
+                if playback_epoch != seen_epoch:
+                    reset_detection(); playback = PlaybackGate(); manual_override = False
+                    seen_epoch = playback_epoch
                 if not playback.accept(paused.get('data') if paused.get('error') == 'success' else None,
                                        position.get('data') if position.get('error') == 'success' else None):
+                    reset_detection()
                     self.stopped.wait(self.interval); continue
+                if playback.discontinuity:
+                    reset_detection(); manual_override = False
+                frame_epoch = playback_epoch
+                frame_position = position['data']
+                captured_at = time.monotonic()
                 image.unlink(missing_ok=True)
                 result = command('screenshot-to-file', str(image), 'video')
                 if result.get('error') != 'success' or not image.exists():
                     unavailable_frame()
                     self.stopped.wait(self.interval); continue
                 self.process.stdin.write(json.dumps({'image':str(image)})+'\n'); self.process.stdin.flush()
-                response = self._read_worker(15)
+                response = self._read_worker(3)
                 image.unlink(missing_ok=True)
                 score = response.get('score')
-                if not isinstance(score, (int,float)) or not 0 <= score <= 1:
+                if isinstance(score, bool) or not isinstance(score, (int,float)) or not 0 <= score <= 1:
                     unavailable_frame()
+                    self.stopped.wait(self.interval); continue
+                # mpv may have sought, changed files, or paused while inference ran.
+                current_pause = command('get_property', 'pause')
+                current_position = command('get_property', 'time-pos')
+                current = current_position.get('data')
+                elapsed = time.monotonic() - captured_at
+                if (self.stopped.is_set() or playback_epoch != frame_epoch or
+                    current_pause.get('error') != 'success' or current_pause.get('data') is not False or
+                    current_position.get('error') != 'success' or isinstance(current, bool) or
+                    not isinstance(current, (int, float)) or not math.isfinite(current) or
+                    current < frame_position or current - frame_position > max(2, elapsed * 3 + 1)):
+                    reset_detection(); playback = PlaybackGate(); manual_override = False
+                    seen_epoch = playback_epoch
                     self.stopped.wait(self.interval); continue
                 failures = 0
                 was_ad = decision.ad
                 in_ad = decision.update(score)
+                if score >= .8: manual_override = False
                 if self.mute:
                     muted = command('get_property', 'mute')
                     muted = muted.get('data') if muted.get('error') == 'success' else None
-                    if isinstance(muted, bool):
-                        action = state.update(in_ad, muted)
-                        if action is not None: command('set_property', 'mute', action)
+                    if not isinstance(muted, bool): raise OSError('Could not read the player mute state')
+                    if self.stopped.is_set() or playback_epoch != frame_epoch:
+                        reset_detection(); playback = PlaybackGate(); manual_override = False
+                        seen_epoch = playback_epoch
+                        continue
+                    if state.applied and not muted: manual_override = True
+                    previous = state.in_ad, state.applied
+                    action = state.update(in_ad and not manual_override, muted)
+                    if action is not None and command('set_property', 'mute', action).get('error') != 'success':
+                        state.in_ad, state.applied = previous
+                        raise OSError('Could not change the player mute state')
+                    if self.stopped.is_set() or playback_epoch != frame_epoch:
+                        # A seek can arrive with the mute command's reply. Undo
+                        # a newly applied mute before waiting or sampling again.
+                        reset_detection(); playback = PlaybackGate(); manual_override = False
+                        seen_epoch = playback_epoch
+                        continue
                 if in_ad != was_ad:
                     label = ('Possible ad: auto-mute' if self.mute else 'Possible ad: audio unchanged') if in_ad else 'Broadcast detected'
                     command('show-text', label, 2000)
@@ -275,7 +331,7 @@ class Monitor:
                 except (OSError, ValueError): pass
         finally:
             # Never strand a player muted if detection fails while it is still open.
-            if command and state.applied and not self.stopped.is_set():
+            if command and state.applied:
                 try:
                     muted = command('get_property', 'mute')
                     if muted.get('data') is True: command('set_property', 'mute', False)

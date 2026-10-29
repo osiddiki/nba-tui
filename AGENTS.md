@@ -23,6 +23,7 @@ Run `./sports-cli` in a terminal, or `./sports-cli --list --league nba` for non-
 - `sportscli/ad_mute.py`: optional mpv muting for complete replay playlists with explicit ad cues.
 - `sportscli/ai_ad_mute.py`, `sportscli/ai_ad_worker.py`: separately installed, optional local NBA-only frame classifier and mpv muting control. Model weights and Python packages live outside the checkout.
 - `sportscli/tools/export_ad_model.py`: optional developer-only export of the upstream MIT-licensed model using TensorFlow 2.16.2 and Keras 3.3.3; no model files are committed.
+- `sportscli/tools/evaluate_ads.py`: offline evaluation against manually labeled local video; see `docs/ad-detector-testing.md` for labels, data splits, and limits.
 - `tests/`: offline tests for discovery, search, playback, relay, player state and UI behavior.
 
 Preserve the lazy workflow: global search uses a local team index and fetches at most three relevant leagues after a brief typing debounce. It may preview sources for one identified live game and look up replay servers only after a replay and provider are selected. Keep UI work responsive while directories load, retain the user's selection, and discard stale results when navigating away. Live schedules hide games ESPN marks completed; explicitly offline listings and sources that fail during a session are hidden until refresh. Replay archives intentionally include finished games.

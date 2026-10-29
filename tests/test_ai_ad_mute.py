@@ -9,18 +9,96 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from sportscli import ai_ad_mute, app as nba
 
 
+class FakePlayer:
+    """A live IPC peer with mutable playback and a deterministic frame worker."""
+    def __init__(self, path, muted=False):
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(path); self.server.listen(1)
+        self.muted = muted; self.paused = False; self.position = 10.0
+        self.stalled = False; self.score = .01; self.delay = 0
+        self.commands = []; self.frames = 0; self.events = []; self.errors = []
+        self.frame_error = False; self.mute_error = False; self.hook = None
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def serve(self):
+        try:
+            connection, _ = self.server.accept()
+            with connection, connection.makefile('rb') as reader:
+                for line in reader:
+                    request = json.loads(line); command = request['command']
+                    self.commands.append(command)
+                    if self.hook: self.hook(command)
+                    data = None; error = 'success'
+                    if command[:2] == ['get_property', 'pause']: data = self.paused
+                    elif command[:2] == ['get_property', 'time-pos']:
+                        if not self.stalled: self.position += .1
+                        data = self.position
+                    elif command[:2] == ['get_property', 'mute']: data = self.muted
+                    elif command[:2] == ['set_property', 'mute']:
+                        if self.mute_error: error = 'property unavailable'
+                        else: self.muted = command[2]
+                    elif command[0] == 'screenshot-to-file':
+                        self.frames += 1
+                        if self.frame_error: error = 'screenshot failed'
+                        else:
+                            pathlib.Path(command[1]).write_text(json.dumps({'score':self.score, 'delay':self.delay}))
+                    while self.events:
+                        connection.sendall((json.dumps({'event':self.events.pop(0)})+'\n').encode())
+                    connection.sendall((json.dumps({'request_id':request['request_id'], 'error':error, 'data':data})+'\n').encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            self.errors.append(exc)
+
+    def wait_for(self, predicate, timeout=3):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate(): return True
+            time.sleep(.005)
+        return False
+
+    @property
+    def mute_commands(self):
+        return [command[2] for command in self.commands if command[:2] == ['set_property', 'mute']]
+
+
 class AiAdMuteTests(unittest.TestCase):
+    @contextmanager
+    def detector(self, muted=False):
+        with tempfile.TemporaryDirectory(prefix='ai-ipc-test-', dir='/tmp') as root:
+            worker = pathlib.Path(root) / 'worker.py'
+            worker.write_text('import json,sys,time\nprint(json.dumps({"ready":True}),flush=True)\n'
+                              'for line in sys.stdin:\n'
+                              ' with open(json.loads(line)["image"]) as f: frame=json.load(f)\n'
+                              ' time.sleep(frame["delay"])\n'
+                              ' print(json.dumps({"score":frame["score"]}),flush=True)\n')
+            path = str(pathlib.Path(root) / 'player.sock')
+            player = FakePlayer(path, muted=muted)
+            monitor = ai_ad_mute.Monitor(path, root, python=sys.executable, model='unused', interval=.03)
+            try:
+                with patch.object(ai_ad_mute, 'WORKER', worker):
+                    monitor.start()
+                    yield player, monitor
+                    monitor.stop()
+                self.assertFalse(monitor.thread.is_alive())
+                self.assertFalse((pathlib.Path(root) / 'current-frame.jpg').exists())
+                self.assertEqual(player.errors, [])
+            finally:
+                monitor.stop(); player.server.close(); player.thread.join(timeout=2)
+
     def test_repeated_predictions_and_uncertain_frames_are_conservative(self):
         decision = ai_ad_mute.Decision()
         self.assertFalse(decision.update(.1))
         self.assertTrue(decision.update(.05))
-        self.assertTrue(decision.update(.9))
+        self.assertFalse(decision.update(.9))
         self.assertFalse(decision.update(.95))
         self.assertFalse(decision.update(.1))
         self.assertTrue(decision.update(.1))
@@ -38,6 +116,138 @@ class AiAdMuteTests(unittest.TestCase):
         self.assertFalse(gate.accept(None, 10.5))
         self.assertTrue(gate.accept(False, 10.5))
         self.assertTrue(gate.accept(False, 3.0))  # Seeking backwards is valid.
+        self.assertTrue(gate.discontinuity)
+        self.assertTrue(gate.accept(False, 90.0))
+        self.assertTrue(gate.discontinuity)
+
+    def test_stop_restores_detector_mute_while_player_stays_open(self):
+        with self.detector() as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.muted))
+            monitor.stop()
+            self.assertFalse(player.muted)
+            self.assertEqual(player.mute_commands, [True, False])
+
+    def test_stop_preserves_player_that_was_already_muted(self):
+        with self.detector(muted=True) as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.frames >= 4))
+            monitor.stop()
+            self.assertTrue(player.muted)
+            self.assertEqual(player.mute_commands, [])
+
+    def test_first_coverage_frame_releases_detector_mute(self):
+        with self.detector() as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.muted))
+            player.score = .95
+            coverage_frames = []
+            def hook(command):
+                if command[0] == 'screenshot-to-file': coverage_frames.append(player.frames + 1)
+            player.hook = hook
+            self.assertTrue(player.wait_for(lambda: not player.muted))
+            self.assertEqual(len(coverage_frames), 1)
+
+    def test_pause_or_stall_releases_mute(self):
+        for pause in (False, True):
+            with self.subTest(paused=pause), self.detector() as (player, monitor):
+                self.assertTrue(player.wait_for(lambda: player.muted))
+                player.paused = pause; player.stalled = True
+                self.assertTrue(player.wait_for(lambda: not player.muted))
+
+    def test_failed_frame_releases_mute_and_discards_previous_evidence(self):
+        with self.detector() as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.muted))
+            player.frame_error = True
+            self.assertTrue(player.wait_for(lambda: not player.muted))
+            player.score = .95; player.frame_error = False
+            self.assertTrue(player.wait_for(lambda: player.frames >= 5))
+            self.assertEqual(player.mute_commands, [True, False])
+
+    def test_worker_failure_restores_mute(self):
+        with self.detector() as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.muted))
+            monitor.process.kill()
+            self.assertTrue(player.wait_for(lambda: not monitor.thread.is_alive()))
+            self.assertFalse(player.muted)
+
+    def test_invalid_prediction_releases_mute(self):
+        for score in (True, float('nan')):
+            with self.subTest(score=score), self.detector() as (player, monitor):
+                self.assertTrue(player.wait_for(lambda: player.muted))
+                player.score = score
+                self.assertTrue(player.wait_for(lambda: not player.muted))
+
+    def test_seek_releases_owned_mute_before_classifying_new_position(self):
+        with self.detector() as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.muted))
+            frames_before_seek = player.frames; released_at = []
+            def hook(command):
+                if command == ['set_property', 'mute', False]: released_at.append(player.frames)
+            player.hook = hook; player.score = .95
+            player.position += 100; player.events.append('seek')
+            self.assertTrue(player.wait_for(lambda: not player.muted))
+            self.assertEqual(released_at, [frames_before_seek])
+
+    def test_seek_with_mute_reply_immediately_restores_newly_owned_mute(self):
+        with self.detector() as (player, monitor):
+            released_at = []
+            def hook(command):
+                if command == ['set_property', 'mute', True]:
+                    player.position += 100; player.events.append('seek'); player.score = .95
+                elif command == ['set_property', 'mute', False]:
+                    released_at.append(player.frames)
+            player.hook = hook
+            self.assertTrue(player.wait_for(lambda: bool(released_at)))
+            self.assertEqual(released_at, [2])
+            self.assertEqual(player.mute_commands, [True, False])
+            self.assertFalse(player.muted)
+
+    def test_rejected_mute_command_does_not_claim_user_mute(self):
+        with self.detector() as (player, monitor):
+            player.mute_error = True
+            self.assertTrue(player.wait_for(lambda: not monitor.thread.is_alive()))
+            self.assertFalse(player.muted)
+            self.assertEqual(player.mute_commands, [True])
+
+    def test_seek_during_inference_discards_old_frame(self):
+        for event in ('seek', 'file-loaded'):
+            with self.subTest(event=event), self.detector() as (player, monitor):
+                player.delay = .08
+                def hook(command):
+                    if command[0] == 'screenshot-to-file' and player.frames == 1:
+                        player.position += 100
+                        player.events.append(event)
+                    elif command[0] == 'screenshot-to-file' and player.frames >= 2:
+                        player.score = .95
+                player.hook = hook
+                self.assertTrue(player.wait_for(lambda: player.frames >= 4))
+                self.assertEqual(player.mute_commands, [])
+
+    def test_seek_resets_accumulated_ad_evidence_without_an_event(self):
+        with self.detector() as (player, monitor):
+            def hook(command):
+                if command[0] == 'screenshot-to-file' and player.frames == 0:
+                    player.position += 100
+                elif command[0] == 'screenshot-to-file' and player.frames >= 2:
+                    player.score = .95
+            player.hook = hook
+            self.assertTrue(player.wait_for(lambda: player.frames >= 4))
+            self.assertEqual(player.mute_commands, [])
+
+    def test_manual_unmute_survives_uncertain_predictions_until_coverage(self):
+        with self.detector() as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.muted))
+            player.muted = False
+            start = player.frames
+            self.assertTrue(player.wait_for(lambda: player.frames >= start + 2))
+            player.score = .5; start = player.frames
+            self.assertTrue(player.wait_for(lambda: player.frames >= start + 5))
+            player.score = .01; start = player.frames
+            self.assertTrue(player.wait_for(lambda: player.frames >= start + 4))
+            self.assertFalse(player.muted)
+            self.assertEqual(player.mute_commands, [True])
+            player.score = .95; start = player.frames
+            self.assertTrue(player.wait_for(lambda: player.frames >= start + 2))
+            player.score = .01
+            self.assertTrue(player.wait_for(lambda: player.muted))
 
     def test_model_and_runtime_are_external_and_never_enabled_by_config(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'XDG_DATA_HOME':root}):
