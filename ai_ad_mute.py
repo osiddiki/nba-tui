@@ -78,7 +78,7 @@ def install():
     try:
         build = temporary / 'build'; build.mkdir()
         source = build / 'source.keras'
-        digest = hashlib.sha256(); total = 0
+        digest = hashlib.sha256(); total = 0; reported = 0
         with urllib.request.urlopen(MODEL_URL, timeout=45) as response, source.open('wb') as out:
             while True:
                 chunk = response.read(256 * 1024)
@@ -86,26 +86,32 @@ def install():
                 total += len(chunk)
                 if total > MAX_MODEL_BYTES: raise ValueError('Model download exceeded the expected size')
                 digest.update(chunk); out.write(chunk)
+                if total // 20_000_000 > reported:
+                    reported = total // 20_000_000
+                    print(f'Downloaded {total // 1_000_000} MB of approximately 150 MB...', flush=True)
         if digest.hexdigest() != MODEL_SHA256: raise ValueError('Model checksum did not match')
         converter = build / 'venv'
+        print('Installing temporary conversion tools...', flush=True)
         subprocess.run([interpreter, '-m', 'venv', str(converter)], check=True)
         conversion_python = converter / 'bin' / 'python'
         tensorflow = 'tensorflow==2.16.2' if sys.platform == 'darwin' else 'tensorflow-cpu==2.16.2'
-        subprocess.run([str(conversion_python), '-m', 'pip', 'install', '--no-cache-dir',
+        subprocess.run([str(conversion_python), '-m', 'pip', 'install', '--quiet', '--no-cache-dir',
                         tensorflow, 'keras==3.3.3'], check=True)
         env = os.environ.copy()
         env.update({'CUDA_VISIBLE_DEVICES':'-1', 'OMP_NUM_THREADS':'2', 'OPENBLAS_NUM_THREADS':'1',
                     'TF_NUM_INTRAOP_THREADS':'2', 'TF_NUM_INTEROP_THREADS':'1', 'TF_CPP_MIN_LOG_LEVEL':'3'})
         model = temporary / 'nba-ads-v1.tflite'
+        print('Optimizing the model locally...', flush=True)
         subprocess.run([str(conversion_python), str(EXPORTER), str(source), str(model)], env=env, check=True)
         if not model.is_file() or not 0 < model.stat().st_size <= 25_000_000:
             raise ValueError('Converted model has an unexpected size')
         shutil.rmtree(build)
+        print('Installing the isolated detection runtime...', flush=True)
         subprocess.run([interpreter, '-m', 'venv', str(temporary / 'venv')], check=True)
         python = temporary / 'venv' / 'bin' / 'python'
         runtime = ('tensorflow==2.16.2' if intel_mac else
                    'ai-edge-litert==1.4.0' if python_version == (3, 9) else 'ai-edge-litert==2.3.0')
-        subprocess.run([str(python), '-m', 'pip', 'install', '--no-cache-dir', runtime, 'Pillow>=10,<12'], check=True)
+        subprocess.run([str(python), '-m', 'pip', 'install', '--quiet', '--no-cache-dir', runtime, 'Pillow>=10,<12'], check=True)
         check = subprocess.run([str(python), '-u', str(WORKER), str(model)], input='', capture_output=True,
                                text=True, env=env, timeout=60, check=True)
         if not json.loads(check.stdout.splitlines()[0]).get('ready'):
