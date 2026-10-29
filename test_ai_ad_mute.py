@@ -35,23 +35,26 @@ class AiAdMuteTests(unittest.TestCase):
 
     def test_explicit_installer_checks_download_before_installing(self):
         contents = b'local test model'
-        def make_venv(path, with_pip):
-            python = pathlib.Path(path) / 'bin' / 'python'
-            python.parent.mkdir(parents=True)
-            python.write_text('test interpreter')
+        def run(args, **kwargs):
+            if len(args) > 3 and args[1:3] == ['-m', 'venv']:
+                python = pathlib.Path(args[3]) / 'bin' / 'python'
+                python.parent.mkdir(parents=True)
+                python.write_text('test interpreter')
+            elif len(args) > 3 and args[1] == str(ai_ad_mute.EXPORTER):
+                pathlib.Path(args[3]).write_bytes(b'converted model')
+            return SimpleNamespace(stdout='{"ready":true}\n', returncode=0)
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'XDG_DATA_HOME':root}), \
              patch.object(ai_ad_mute.urllib.request, 'urlopen', side_effect=lambda *a, **k:io.BytesIO(contents)), \
-             patch.object(ai_ad_mute.venv, 'create', side_effect=make_venv) as create_venv, \
-             patch.object(ai_ad_mute.subprocess, 'run') as pip, \
+             patch.object(ai_ad_mute.subprocess, 'run', side_effect=run) as execute, \
              patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO):
             with patch.object(ai_ad_mute, 'MODEL_SHA256', 'wrong-checksum'):
                 self.assertEqual(ai_ad_mute.install(), 1)
             self.assertFalse(ai_ad_mute.installed())
-            create_venv.assert_not_called(); pip.assert_not_called()
+            execute.assert_not_called()
             with patch.object(ai_ad_mute, 'MODEL_SHA256', hashlib.sha256(contents).hexdigest()):
                 self.assertEqual(ai_ad_mute.install(), 0)
             self.assertTrue(ai_ad_mute.installed())
-            create_venv.assert_called_once(); pip.assert_called_once()
+            self.assertEqual(execute.call_count, 6)
 
     def test_other_sports_play_without_nba_classifier(self):
         class Screen:

@@ -15,15 +15,16 @@ import tempfile
 import threading
 import time
 import urllib.request
-import venv
 
 from ad_mute import MuteState
 
 
-MODEL_URL = 'https://github.com/osiddiki/nba-tui/releases/download/ad-model-v1/nba-ads-v1.tflite'
-MODEL_SHA256 = '301e528cdf3f00d5d76e6a051dc1de0e64a9b4293beb2fbdb667d8373d1d46df'
-MAX_MODEL_BYTES = 25_000_000
+MODEL_URL = ('https://huggingface.co/plt3/NBA-redzone-ML/resolve/'
+             'cd44632d73cd178c975304dbb13502d6a49e3d91/part5_cropped_5-29-24.keras?download=true')
+MODEL_SHA256 = '463f8964888ee2d55c176b385f4587eabd7cc508be36813c58db54925460ac83'
+MAX_MODEL_BYTES = 160_000_000
 WORKER = pathlib.Path(__file__).resolve().with_name('ai_ad_worker.py')
+EXPORTER = pathlib.Path(__file__).resolve().parent / 'tools' / 'export_ad_model.py'
 
 
 def installation_dir():
@@ -41,6 +42,15 @@ def installed():
     return python.is_file() and model.is_file()
 
 
+def compatible_python():
+    if (3, 9) <= sys.version_info[:2] <= (3, 12):
+        return sys.executable, sys.version_info[:2]
+    for minor in (12, 11, 10, 9):
+        executable = shutil.which(f'python3.{minor}')
+        if executable: return executable, (3, minor)
+    return None, None
+
+
 def install():
     """Install only when the user explicitly requests the optional model."""
     if installed():
@@ -48,11 +58,10 @@ def install():
         return 0
     if sys.platform != 'darwin' and not sys.platform.startswith('linux'):
         print('AI ad detection requires macOS or Linux.', file=sys.stderr); return 1
-    if sys.version_info < (3, 9):
-        print('AI ad detection requires Python 3.9 or newer.', file=sys.stderr); return 1
+    interpreter, python_version = compatible_python()
+    if not interpreter:
+        print('The one-time AI setup needs Python 3.9 through 3.12 and venv.', file=sys.stderr); return 1
     intel_mac = sys.platform == 'darwin' and platform.machine().lower() in ('x86_64', 'amd64')
-    if intel_mac and sys.version_info >= (3, 13):
-        print('AI detection on Intel Macs requires Python 3.9 through 3.12.', file=sys.stderr); return 1
     root = installation_dir()
     try: root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
@@ -60,15 +69,17 @@ def install():
     if root.exists():
         print(f'Incomplete installation exists at {root}; remove it before retrying.', file=sys.stderr)
         return 1
-    print('Installing the optional local NBA ad detector; this downloads a 22 MB model and Python packages.')
+    print('Installing the optional NBA ad detector. This downloads a 150 MB source model and conversion packages;')
+    print('allow about 1.5 GB of temporary space. The final model is about 22 MB.', flush=True)
     if intel_mac: print('Intel macOS needs the larger TensorFlow runtime.')
     try: temporary = pathlib.Path(tempfile.mkdtemp(prefix='ad-mute-', dir=str(root.parent)))
     except OSError as exc:
         print(f'Cannot create temporary installation: {exc}', file=sys.stderr); return 1
     try:
-        model = temporary / 'nba-ads-v1.tflite'
+        build = temporary / 'build'; build.mkdir()
+        source = build / 'source.keras'
         digest = hashlib.sha256(); total = 0
-        with urllib.request.urlopen(MODEL_URL, timeout=45) as response, model.open('wb') as out:
+        with urllib.request.urlopen(MODEL_URL, timeout=45) as response, source.open('wb') as out:
             while True:
                 chunk = response.read(256 * 1024)
                 if not chunk: break
@@ -76,16 +87,34 @@ def install():
                 if total > MAX_MODEL_BYTES: raise ValueError('Model download exceeded the expected size')
                 digest.update(chunk); out.write(chunk)
         if digest.hexdigest() != MODEL_SHA256: raise ValueError('Model checksum did not match')
-        venv.create(str(temporary / 'venv'), with_pip=True)
+        converter = build / 'venv'
+        subprocess.run([interpreter, '-m', 'venv', str(converter)], check=True)
+        conversion_python = converter / 'bin' / 'python'
+        tensorflow = 'tensorflow==2.16.2' if sys.platform == 'darwin' else 'tensorflow-cpu==2.16.2'
+        subprocess.run([str(conversion_python), '-m', 'pip', 'install', '--no-cache-dir',
+                        tensorflow, 'keras==3.3.3'], check=True)
+        env = os.environ.copy()
+        env.update({'CUDA_VISIBLE_DEVICES':'-1', 'OMP_NUM_THREADS':'2', 'OPENBLAS_NUM_THREADS':'1',
+                    'TF_NUM_INTRAOP_THREADS':'2', 'TF_NUM_INTEROP_THREADS':'1', 'TF_CPP_MIN_LOG_LEVEL':'3'})
+        model = temporary / 'nba-ads-v1.tflite'
+        subprocess.run([str(conversion_python), str(EXPORTER), str(source), str(model)], env=env, check=True)
+        if not model.is_file() or not 0 < model.stat().st_size <= 25_000_000:
+            raise ValueError('Converted model has an unexpected size')
+        shutil.rmtree(build)
+        subprocess.run([interpreter, '-m', 'venv', str(temporary / 'venv')], check=True)
         python = temporary / 'venv' / 'bin' / 'python'
         runtime = ('tensorflow==2.16.2' if intel_mac else
-                   'ai-edge-litert==1.4.0' if sys.version_info[:2] == (3, 9) else 'ai-edge-litert==2.3.0')
+                   'ai-edge-litert==1.4.0' if python_version == (3, 9) else 'ai-edge-litert==2.3.0')
         subprocess.run([str(python), '-m', 'pip', 'install', '--no-cache-dir', runtime, 'Pillow>=10,<12'], check=True)
+        check = subprocess.run([str(python), '-u', str(WORKER), str(model)], input='', capture_output=True,
+                               text=True, env=env, timeout=60, check=True)
+        if not json.loads(check.stdout.splitlines()[0]).get('ready'):
+            raise ValueError('The installed detector could not load the model')
         # Use the venv Python directly; do not rely on relocation-sensitive pip scripts.
         os.rename(temporary, root)
         print('Installed. Run ./sports_live --ai-ad-mute to enable it for a session.')
         return 0
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
         print(f'Optional AI detector installation failed: {exc}', file=sys.stderr)
         return 1
     finally:
