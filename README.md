@@ -103,6 +103,17 @@ To enable ad mute for one run, start with `./sports_live --ad-mute`. Normal laun
 
 Most live streams tested do not include these markers, and this setting does not yet detect their commercials. A replay without markers, IINA, and Celluloid also play without automatic muting. Manual mute controls remain available in the player.
 
+For an **experimental local AI detector for NBA broadcasts**, install it separately, then opt in for each run:
+
+```sh
+./sports_live --install-ad-model   # one-time optional download
+./sports_live --ai-ad-mute         # enable for this run
+```
+
+The install downloads a 22 MB model and an isolated Python runtime into `${XDG_DATA_HOME:-~/.local/share}/sports-live/ad-mute/`; it does not change the normal setup or add model files to the Git checkout. On Linux and Apple Silicon, the installed runtime and model take roughly 200 MB, depending on Python and platform. Intel Macs use a larger TensorFlow runtime. Python's `venv` and pip must be available. The normal launcher never installs the model automatically.
+
+This detector samples video frames locally in mpv and sends nothing to an AI service. It was trained for NBA video and is disabled for other leagues. It waits for repeated predictions before muting or unmuting, but it can misclassify studio coverage, highlights, or ads; use mpv's `m` key to override it. Its accuracy on these providers and other sports is not established. The model is a quantized version of the MIT-licensed [NBA-redzone-ML model](https://huggingface.co/plt3/NBA-redzone-ML), and the project describes its original training and evaluation [here](https://github.com/plt3/NBA-redzone-ML).
+
 ### Add-ons and resolver
 
 Press `a` to configure a compatible sports Stremio add-on. For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./sports_live --addon 'https://…/manifest.json'`.

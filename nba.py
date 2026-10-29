@@ -27,6 +27,7 @@ import grading
 import replays
 import smart_search
 import ad_mute
+import ai_ad_mute
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
@@ -67,6 +68,7 @@ HELP_LINES = [
     'CHECKS         t: test selected source    g: rank by your checks',
     'PLAYERS        p: player    c: cache    v: terminal video (mpv)',
     'AD MUTE        --ad-mute: marked replays in mpv only',
+    'AI ADS         --ai-ad-mute: optional local NBA detector in mpv',
     'MORE           i: show media URL    u: play a pasted media URL',
     'SETUP          a: sports add-on    d: local PPV resolver',
     'REFRESH        r: reload current list    q: quit',
@@ -649,7 +651,7 @@ def quick_probe_feed(feed):
 
 
 class App:
-    def __init__(self, screen, config, *, ad_mute_enabled=False):
+    def __init__(self, screen, config, *, ad_mute_enabled=False, ai_ad_mute_enabled=False):
         self.scr, self.config = screen, config
         self.games, self.all_games, self.feeds = [], [], []
         self.replays = []
@@ -714,6 +716,7 @@ class App:
         self.cache = int(config.get('cache', 15)) if str(config.get('cache', 15)) in ('5','15','30') else 15
         self.terminal_video = bool(config.get('terminal_video', False))
         self.ad_mute = ad_mute_enabled
+        self.ai_ad_mute = ai_ad_mute_enabled
         self.player = config.get('player', 'mpv') if config.get('player', 'mpv') in ('mpv', 'iina', 'celluloid') else 'mpv'
         self.rank_by_checks = False
 
@@ -819,7 +822,8 @@ class App:
                 self.put(2, 1, f'{game.title}  |  {game.start.astimezone().strftime("%a %b %d %I:%M %p %Z")}')
                 self.put(3, 1, 'TV: ' + (', '.join(game.broadcasts) or 'not listed'))
             rank = '  |  ranked' if self.rank_by_checks else ''
-            self.put(4, 1, f'{self.player.upper()}  |  side: {self.filter}  |  source: {self.provider_filter}  |  search: {self.feed_search or "all"}  |  cache: {self.cache}s  |  ad mute: {"on" if self.ad_mute else "off"}{rank}')
+            ad_mode = 'AI NBA' if self.ai_ad_mute else 'marked replays' if self.ad_mute else 'off'
+            self.put(4, 1, f'{self.player.upper()}  |  side: {self.filter}  |  source: {self.provider_filter}  |  search: {self.feed_search or "all"}  |  cache: {self.cache}s  |  ad mute: {ad_mode}{rank}')
             fs = self.visible_feeds()
             self.fi = min(self.fi, max(0, len(fs)-1))
             name_width = max(14, min(50, w-40))
@@ -1238,6 +1242,10 @@ class App:
     def play(self, feed):
         if feed.kind == 'web':
             self.message = 'This add-on supplied a browser-only source.'; return
+        if self.ai_ad_mute and self.player != 'mpv':
+            self.message = 'AI ad mute requires mpv. Press p to switch players.'; return
+        if self.ai_ad_mute and not ai_ad_mute.installed():
+            self.message = 'AI detector not installed. Run ./sports_live --install-ad-model.'; return
         iina = find_iina() if self.player == 'iina' else None
         celluloid = find_celluloid() if self.player == 'celluloid' else None
         if self.player == 'iina' and not iina:
@@ -1287,13 +1295,16 @@ class App:
                 if not intervals: ad_note = ' No marked ads found; ad mute was inactive.'
             else:
                 ad_note = ' Ad mute is available only for marked replays.'
+        ai_active = self.ai_ad_mute and self.league == 'nba'
+        if self.ai_ad_mute and not ai_active:
+            ad_note = ' AI ad mute is currently limited to NBA broadcasts.'
         temporary, monitor = None, None
         command = mpv_command(url, headers, cache=self.cache, terminal_video=self.terminal_video)
-        if intervals:
+        if intervals or ai_active:
             try:
                 temporary = tempfile.TemporaryDirectory(prefix='sports-mpv-', dir='/tmp')
                 socket_path = os.path.join(temporary.name, 'mpv.sock')
-                monitor = ad_mute.Monitor(socket_path, intervals)
+                monitor = ai_ad_mute.Monitor(socket_path, temporary.name) if ai_active else ad_mute.Monitor(socket_path, intervals)
                 monitor.start()
                 command.insert(1, '--input-ipc-server=' + socket_path)
             except OSError:
@@ -1568,8 +1579,15 @@ def main():
     parser.add_argument('--league', choices=LEAGUES, help='Open a league directly (default: search in the app; nba for --list)')
     parser.add_argument('--addon', help='Stremio sports add-on manifest URL for this run')
     parser.add_argument('--resolver-dir', help='Local ppv-hls-proxy checkout for this run')
-    parser.add_argument('--ad-mute', action='store_true', help='Mute explicitly marked replay ad breaks in mpv for this run')
+    mute = parser.add_mutually_exclusive_group()
+    mute.add_argument('--ad-mute', action='store_true', help='Mute explicitly marked replay ad breaks in mpv for this run')
+    mute.add_argument('--ai-ad-mute', action='store_true', help='Use the optional experimental local NBA ad detector in mpv')
+    parser.add_argument('--install-ad-model', action='store_true', help='Explicitly download and install the optional local NBA ad detector')
     args = parser.parse_args(); config = load_config()
+    if args.install_ad_model: return ai_ad_mute.install()
+    if args.ai_ad_mute and not ai_ad_mute.installed():
+        print('AI ad detector not installed. Run ./sports_live --install-ad-model first.', file=sys.stderr)
+        return 2
     if args.addon: config['addon'] = args.addon
     if args.resolver_dir: config['resolver_dir'] = args.resolver_dir
     if args.list:
@@ -1595,7 +1613,7 @@ def main():
         print('An interactive terminal is required; use --list for plain output.', file=sys.stderr); return 2
     try:
         def run_ui(screen):
-            app = App(screen, config, ad_mute_enabled=args.ad_mute)
+            app = App(screen, config, ad_mute_enabled=args.ad_mute, ai_ad_mute_enabled=args.ai_ad_mute)
             if args.league:
                 app.league = args.league
                 app.league_index = list(LEAGUES).index(args.league)
