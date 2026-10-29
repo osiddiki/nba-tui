@@ -9,7 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 
-import grading
+from . import grading
 
 
 def cue_intervals(manifest):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import pathlib
 import platform
@@ -16,7 +17,7 @@ import threading
 import time
 import urllib.request
 
-from ad_mute import MuteState
+from .ad_mute import MuteState
 
 
 MODEL_URL = ('https://huggingface.co/plt3/NBA-redzone-ML/resolve/'
@@ -118,7 +119,7 @@ def install():
             raise ValueError('The installed detector could not load the model')
         # Use the venv Python directly; do not rely on relocation-sensitive pip scripts.
         os.rename(temporary, root)
-        print('Installed. Run ./sports_live --ai-ad-mute to enable it for a session.')
+        print('Installed. Run ./sports-cli --ai-ad-mute to enable it for a session.')
         return 0
     except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
         print(f'Optional AI detector installation failed: {exc}', file=sys.stderr)
@@ -146,12 +147,27 @@ class Decision:
         return self.ad
 
 
+class PlaybackGate:
+    """Count evidence only when the player is running and its timeline changes."""
+    def __init__(self):
+        self.position = None
+
+    def accept(self, paused, position):
+        if paused is not False or isinstance(position, bool) or not isinstance(position, (int, float)):
+            return False
+        if not math.isfinite(position): return False
+        if self.position is not None and abs(position - self.position) < .05: return False
+        self.position = position
+        return True
+
+
 class Monitor:
-    def __init__(self, socket_path, directory, python=None, model=None, interval=2):
+    def __init__(self, socket_path, directory, python=None, model=None, interval=2, mute=True):
         default_python, default_model = installation_paths()
         self.path, self.directory = socket_path, pathlib.Path(directory)
         self.python, self.model = pathlib.Path(python or default_python), pathlib.Path(model or default_model)
         self.interval = interval
+        self.mute = mute
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.process = None
@@ -207,29 +223,51 @@ class Monitor:
                 raise OSError('stopped')
             command = invoke
             if not self._read_worker(30).get('ready'): raise OSError('AI detector failed to load')
-            command('show-text', 'Local NBA ad detection active', 2000)
-            decision = Decision()
+            command('show-text', 'Local NBA ad detection active' if self.mute else 'Ad detection preview: audio unchanged', 2000)
+            decision = Decision(); playback = PlaybackGate(); failures = 0
+            def unavailable_frame():
+                nonlocal failures, state, decision
+                failures += 1
+                if failures != 3: return
+                muted = command('get_property', 'mute')
+                if muted.get('error') != 'success' or not isinstance(muted.get('data'), bool):
+                    raise OSError('Could not read the player mute state')
+                if state.applied and muted['data']:
+                    if command('set_property', 'mute', False).get('error') != 'success':
+                        raise OSError('Could not restore the player mute state')
+                state = MuteState(); decision = Decision()
+                command('show-text', 'Ad detection paused: frames unavailable', 3000)
             while not self.stopped.is_set():
                 started = time.monotonic()
+                paused = command('get_property', 'pause')
+                position = command('get_property', 'time-pos')
+                if not playback.accept(paused.get('data') if paused.get('error') == 'success' else None,
+                                       position.get('data') if position.get('error') == 'success' else None):
+                    self.stopped.wait(self.interval); continue
                 image.unlink(missing_ok=True)
                 result = command('screenshot-to-file', str(image), 'video')
                 if result.get('error') != 'success' or not image.exists():
+                    unavailable_frame()
                     self.stopped.wait(self.interval); continue
                 self.process.stdin.write(json.dumps({'image':str(image)})+'\n'); self.process.stdin.flush()
                 response = self._read_worker(15)
                 image.unlink(missing_ok=True)
                 score = response.get('score')
                 if not isinstance(score, (int,float)) or not 0 <= score <= 1:
+                    unavailable_frame()
                     self.stopped.wait(self.interval); continue
+                failures = 0
                 was_ad = decision.ad
                 in_ad = decision.update(score)
-                muted = command('get_property', 'mute')
-                muted = muted.get('data') if muted.get('error') == 'success' else None
-                if isinstance(muted, bool):
-                    action = state.update(in_ad, muted)
-                    if action is not None: command('set_property', 'mute', action)
-                    if in_ad != was_ad:
-                        command('show-text', 'Ad detected: auto-mute' if in_ad else 'Broadcast detected: ad break ended', 2000)
+                if self.mute:
+                    muted = command('get_property', 'mute')
+                    muted = muted.get('data') if muted.get('error') == 'success' else None
+                    if isinstance(muted, bool):
+                        action = state.update(in_ad, muted)
+                        if action is not None: command('set_property', 'mute', action)
+                if in_ad != was_ad:
+                    label = ('Possible ad: auto-mute' if self.mute else 'Possible ad: audio unchanged') if in_ad else 'Broadcast detected'
+                    command('show-text', label, 2000)
                 self.stopped.wait(max(0, self.interval-(time.monotonic()-started)))
         except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.SubprocessError):
             if command and not self.stopped.is_set():
@@ -256,3 +294,7 @@ class Monitor:
                 except subprocess.TimeoutExpired:
                     try: self.process.kill(); self.process.wait()
                     except ProcessLookupError: pass
+                for stream in (self.process.stdin, self.process.stdout):
+                    if stream:
+                        try: stream.close()
+                        except OSError: pass

@@ -8,7 +8,7 @@ import json
 import pathlib
 import sys
 
-import nba
+from .. import app as nba
 
 
 def fetch(league):
@@ -35,7 +35,7 @@ def main():
         except Exception as exc:
             print(f'Team index not updated: {type(exc).__name__}: {exc}', file=sys.stderr)
             return 1
-    target = pathlib.Path(__file__).resolve().parent / 'data' / 'teams.json'
+    target = pathlib.Path(__file__).resolve().parent.parent / 'data' / 'teams.json'
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({'updated': dt.date.today().isoformat(), 'leagues': records},
                                  ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf8')

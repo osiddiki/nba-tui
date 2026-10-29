@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
-"""Launch the Sports Live terminal application."""
-from nba import main
+"""Launch the Sports CLI terminal application."""
+import pathlib
+import sys
+
+dependencies = pathlib.Path(__file__).resolve().parent / '.deps'
+if dependencies.is_dir():
+    sys.path.insert(0, str(dependencies))
+
+from sportscli.app import main
 
 if __name__ == '__main__':
     raise SystemExit(main())

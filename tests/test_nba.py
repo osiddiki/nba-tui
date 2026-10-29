@@ -1,9 +1,7 @@
 import datetime as dt
 import unittest
 from unittest.mock import patch
-import nba
-import providers
-import relay
+from sportscli import app as nba, providers, relay
 import gzip
 import http.server
 import io
@@ -13,8 +11,7 @@ import threading
 import time
 import urllib.error
 from types import SimpleNamespace
-import grading
-import replays
+from sportscli import grading, replays
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
@@ -399,7 +396,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_wnba_league_is_loaded_only_after_selection(self):
         class Screen:
-            def __init__(self): self.keys = iter([9, ord('r'), ord('j'), 10, ord('q')])
+            def __init__(self): self.keys = iter([ord('r'), ord('j'), 10, ord('q')])
             def keypad(self, value): pass
             def timeout(self, value): pass
             def getch(self): return next(self.keys)
@@ -411,7 +408,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_lowercase_s_changes_sport_and_d_opens_resolver_settings(self):
         class Screen:
-            def __init__(self): self.keys = iter([9, 10, 10, ord('s'), 27, ord('d'), ord('q')])
+            def __init__(self): self.keys = iter([10, 10, ord('s'), 27, ord('d'), ord('q')])
             def keypad(self, value): pass
             def timeout(self, value): pass
             def getch(self): return next(self.keys)
@@ -421,7 +418,7 @@ class DiscoveryTests(unittest.TestCase):
              patch.object(nba, 'get_games', return_value=[self.game]), patch.object(nba, 'feed_tasks', return_value=[]), \
              patch.object(app, 'configure_resolver') as resolver:
             app.run()
-        self.assertEqual(modes[0], 'search')
+        self.assertEqual(modes[0], 'leagues')
         self.assertEqual(modes[-3:], ['leagues', 'feeds', 'feeds'])
         resolver.assert_called_once()
 

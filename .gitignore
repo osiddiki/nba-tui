@@ -5,6 +5,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.deps/
 .env
 
 # Build and editor files.

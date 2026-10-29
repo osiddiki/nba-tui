@@ -7,7 +7,7 @@ import urllib.parse
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
-import providers
+from . import providers
 
 
 @dataclass(frozen=True)

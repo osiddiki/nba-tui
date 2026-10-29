@@ -11,6 +11,13 @@ import unicodedata
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+try:
+    # Optional acceleration only. The bundled, standard-library matcher below
+    # remains available to users who have not installed the extra dependency.
+    from rapidfuzz import fuzz as _rapid_fuzz, process as _rapid_process
+except ImportError:  # pragma: no cover - exercised by the fallback tests
+    _rapid_fuzz = _rapid_process = None
+
 
 INDEX_PATH = pathlib.Path(__file__).resolve().parent / 'data' / 'teams.json'
 LEAGUE_ORDER = ('nba','wnba','nfl','ncaaf','ncaam','ncaaw','mlb','nhl',
@@ -146,6 +153,7 @@ class TeamIndex:
         self.teams = []
         self.prefixes = {}
         self.second_prefixes = {}
+        token_teams = {}
         for league, rows in data.get('leagues', {}).items():
             for row in rows:
                 if not isinstance(row, list) or len(row) != 6: continue
@@ -161,6 +169,10 @@ class TeamIndex:
                 for prefix in prefixes: self.prefixes.setdefault(prefix, set()).add(number)
                 second = {word[1:3] for alias in aliases for word in alias.split() if len(word) >= 4}
                 for prefix in second: self.second_prefixes.setdefault(prefix, set()).add(number)
+                for token in {word for alias in aliases for word in alias.split() if len(word) >= 4}:
+                    token_teams.setdefault(token, set()).add(number)
+        self.fuzzy_tokens = tuple(token_teams)
+        self.fuzzy_token_teams = tuple(tuple(numbers) for numbers in token_teams.values())
 
     @classmethod
     def load(cls, path=INDEX_PATH):
@@ -191,6 +203,47 @@ class TeamIndex:
                 else: score = 0.0
                 best = max(best, score)
             if best >= .79: found.append((team, best))
+
+        # Exact aliases and prefix results are the reliable path for normal
+        # typing. Short queries stay prefix-only: edit-distance scores on two
+        # or three letters are too ambiguous to help. For longer queries, also
+        # compare against individual alias words so transpositions such as
+        # "lkaers" can match "lakers", even if an unrelated prefix candidate
+        # happened to enter the initial candidate set.
+        if len(fragment) >= 4:
+            if any(score >= .9 for _, score in found):
+                return self._sorted_matches(found)
+            fuzzy = {}
+            max_length_delta = max(2, len(fragment) // 3)
+            eligible = [(token, numbers) for token, numbers in zip(self.fuzzy_tokens, self.fuzzy_token_teams)
+                        if abs(len(fragment) - len(token)) <= max_length_delta]
+            if _rapid_process is not None:
+                tokens = [token for token, _ in eligible]
+                for token, ratio, position in _rapid_process.extract(
+                        fragment, tokens, scorer=_rapid_fuzz.ratio,
+                        processor=None, score_cutoff=80, limit=None):
+                    for number in eligible[position][1]:
+                        fuzzy[number] = max(fuzzy.get(number, 0.0), ratio / 100.0)
+            else:
+                for token, numbers in eligible:
+                    ratio = difflib.SequenceMatcher(None, fragment, token).ratio()
+                    if ratio >= .8:
+                        for number in numbers:
+                            fuzzy[number] = max(fuzzy.get(number, 0.0), ratio)
+            positions = {team: index for index, (team, _) in enumerate(found)}
+            for number, ratio in fuzzy.items():
+                score = .65 + ratio * .25
+                team = self.teams[number]
+                current = positions.get(team)
+                if current is None:
+                    positions[team] = len(found)
+                    found.append((team, score))
+                elif score > found[current][1]:
+                    found[current] = (team, score)
+        return self._sorted_matches(found)
+
+    @staticmethod
+    def _sorted_matches(found):
         found.sort(key=lambda item: (-item[1], LEAGUE_PRIORITY.get(item[0].league, 99), item[0].display))
         return tuple(found[:120])
 

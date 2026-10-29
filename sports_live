@@ -1,6 +1,0 @@
-#!/usr/bin/env python3
-"""Launch the Sports Live terminal application."""
-from nba import main
-
-if __name__ == '__main__':
-    raise SystemExit(main())

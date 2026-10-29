@@ -2,8 +2,7 @@ import http.server
 import threading
 import unittest
 
-import ad_mute
-import nba
+from sportscli import ad_mute, app as nba
 
 
 PLAYLIST = '''#EXTM3U

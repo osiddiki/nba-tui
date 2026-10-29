@@ -1,4 +1,4 @@
-# Sports Live
+# Sports CLI
 
 Find a game or replay in your terminal, choose a source, and play it in mpv, IINA, or Celluloid. Search suggestions appear as you type; the app loads only the relevant schedules and replay catalogs, then finds streams for the game you select. Its compact browsing flow takes inspiration from [ani-cli](https://github.com/pystardust/ani-cli).
 
@@ -34,22 +34,23 @@ Check `node --version`; if it is below 20, install a newer version from [Node.js
 git clone https://github.com/osiddiki/nba-tui.git
 cd nba-tui
 ./setup.sh
-./sports_live
+./sports-cli
 ```
 
-The setup script installs a pinned copy of the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) in `resolver/`. You can run `./sports_live` without setup if you do not need PPV sources. To update an existing checkout later, run `git pull` and then `./sports_live`. The older `./sports-cli` command remains available.
+The setup script installs a pinned copy of the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) in `resolver/` and, when pip is available, the small [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) search accelerator in `.deps/`. You can run `./sports-cli` without setup; search falls back to the built-in matcher and PPV sources need the resolver. To update an existing checkout later, run `git pull` and then `./sports-cli`.
 
 ## First run
 
-1. Start typing on the opening screen, for example `lakers today`, `mavs vs rockets`, `lakers vs blazers oct 27`, or `tamu vs alabama`. Team suggestions appear locally; live games, upcoming games, and matching replays appear as the relevant services respond. Common nicknames and some spelling errors work too.
-2. Use the arrow keys to select a game or replay and press `Enter` to find its streams. Selecting a team suggestion fills in its name so you can refine the search. `Ctrl-U` clears the query; `Ctrl-R` refreshes it. Press `Tab` to browse sports and leagues instead.
-3. Select a source and press `Enter` to play. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `f` by broadcast side, or `/` to search providers and channels. Press `r` to refresh.
-4. On macOS, press `p` to switch between mpv and IINA. On Linux, `p` switches between mpv and Celluloid. The graphical player must be installed first.
-5. To browse archives by league, press `Tab` from search, select a league, then press `R` in its game list. Press `R` again to return to games. Press `s` in a game, replay, or stream list to choose a different sport.
+1. Select a sport or league on the opening screen, or press `s`, `/`, or `Space` to search across sports. Use `./sports-cli --search` to open directly into search.
+2. Try `warriors`, `mavs rockets`, `lakers vs blazers oct 27`, or `tamu vs alabama`. Results are grouped under the team, with live broadcasts, recent replays, and upcoming games. Matching team suggestions follow below. The app checks a relevant team's upcoming schedule and, for specific NBA matchups, searches a few older replay pages in the background.
+3. Use the arrow keys and `Enter` to open a game, a home or away broadcast list, or a replay. Home and away choices appear when a directory identifies those sides; open the live game to see all sources, including unlabeled ones. Replay listings for the same game are grouped; choose a provider, then a server. In search, `Ctrl-U` clears the query, `Ctrl-R` refreshes, and `Tab` returns to sports.
+4. Select a stream and press `Enter` to play. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `f` by broadcast side, or `/` to search providers and channels. Press `r` to refresh.
+5. On macOS, press `p` to switch between mpv and IINA. On Linux, `p` switches between mpv and Celluloid. The graphical player must be installed first.
+6. To browse archives by league, select a league and press `R` in its game list. Press `R` again to return to games. Press `s` in a game, replay, or stream list to choose a different sport.
 
 Press `?` for the in-app controls and `Ctrl-F` to return to global search from another screen. `Esc` goes back. `Ctrl-X` quits from search; `q` quits from the other lists. The schedule date is in Eastern time; game times are displayed in your machine's local timezone. Completed games are omitted from live schedules but may appear as replays.
 
-Search uses a small bundled team index and local fuzzy matching; it does not download or run an AI model. Network requests start only after you type a team or league, and query at most three relevant leagues. Results depend on what schedules and archives provide.
+Search uses a small bundled team index and local fuzzy matching; it does not download or run an AI model. RapidFuzz accelerates typo matching when installed; the standard-library fallback works without it. Network requests start only after you type a team or league and query at most three relevant leagues. The app fetches broadcast listings only for an identified live game and looks up replay servers only after selection. Results depend on what schedules and archives provide.
 
 When using mpv, close its window or press `q` in mpv to return to the picker. IINA and Celluloid open separate windows, leaving the picker usable. **Keep the terminal app open while playing a local relay stream.**
 
@@ -58,6 +59,7 @@ When using mpv, close its window or press `q` in mpv to return to the picker. II
 | Key | Action |
 | --- | --- |
 | `↑` / `↓`, `Enter`, `Esc` | Move, select, or go back (`j` / `k` also move outside search) |
+| `s` / `/` / `Space` on the opening screen | Open global search |
 | `Ctrl-F`, `Tab`, `Ctrl-U`, `Ctrl-R`, `Ctrl-X` | Global search, browse sports, clear, refresh, or quit search |
 | `s` (or `S`), `[`, `]`, `/`, `l` | Choose sport, change schedule date, search, or filter for the Lakers |
 | `R` | Switch between the live schedule and replays |
@@ -67,7 +69,7 @@ When using mpv, close its window or press `q` in mpv to return to the picker. II
 | `u`, `a`, `d` | Paste a media URL, configure an add-on, or select a PPV resolver directory |
 | `?`, `q` | Help or quit |
 
-Keys are case-sensitive except for `s` / `S`. `./sports_live --list --league wnba` prints a plain-text schedule and the first game's streams. `./sports_live --league ncaaf` opens college football directly; `./sports_live --league nba --date 2026-10-31` selects a schedule date. Run `./sports_live --help` for all league codes.
+Keys are case-sensitive except for `s` / `S`. `./sports-cli --list --league wnba` prints a plain-text schedule and the first game's streams. `./sports-cli --league ncaaf` opens college football directly; `./sports-cli --league nba --date 2026-10-31` selects a schedule date. Run `./sports-cli --help` for all league codes.
 
 ## Sources and options
 
@@ -99,24 +101,25 @@ The last 20 manual `t` checks are stored per provider, server, or channel; backg
 
 ### Ad mute
 
-To enable ad mute for one run, start with `./sports_live --ad-mute`. Normal launches leave it off. It currently works only in mpv for complete replay HLS playlists with explicit `EXT-X-CUE-OUT` / `EXT-X-CUE-IN` ad markers. The app mutes at marked breaks and restores sound afterward if it was responsible for muting. It does not download a model, send frames to a service, or run AI.
+To enable ad mute for one run, start with `./sports-cli --ad-mute`. Normal launches leave it off. It currently works only in mpv for complete replay HLS playlists with explicit `EXT-X-CUE-OUT` / `EXT-X-CUE-IN` ad markers. The app mutes at marked breaks and restores sound afterward if it was responsible for muting. It does not download a model, send frames to a service, or run AI.
 
 Most live streams tested do not include these markers, and this setting does not yet detect their commercials. A replay without markers, IINA, and Celluloid also play without automatic muting. Manual mute controls remain available in the player.
 
 For an **experimental local AI detector for NBA broadcasts**, install it separately, then opt in for each run:
 
 ```sh
-./sports_live --install-ad-model   # one-time optional download
-./sports_live --ai-ad-mute         # enable for this run
+./sports-cli --install-ad-model   # one-time optional download
+./sports-cli --ai-ad-observe      # show predictions, keep audio unchanged
+./sports-cli --ai-ad-mute         # enable for this run
 ```
 
 The install downloads the original 150 MB model and conversion packages, verifies its checksum, and quantizes it locally. Allow about 1.5 GB of temporary disk space during installation. It removes the source model and conversion environment afterward, leaving the 22 MB model and an isolated runtime in `${XDG_DATA_HOME:-~/.local/share}/sports-live/ad-mute/`. On Linux and Apple Silicon, the finished installation takes roughly 200 MB, depending on Python and platform. Intel Macs use a larger TensorFlow runtime. Setup needs Python 3.9–3.12 with `venv` and pip; on Ubuntu/Debian, install `python3-venv` if needed. If the app runs on a newer Python, it searches for a compatible version. The normal launcher never installs the model automatically, and the Git checkout contains no model weights.
 
-This detector samples video frames locally in mpv and sends nothing to an AI service. It was trained for NBA video and is disabled for other leagues. It waits for repeated predictions before muting or unmuting, but it can misclassify studio coverage, highlights, or ads; use mpv's `m` key to override it. Its accuracy on these providers and other sports is not established. The model is a quantized version of the MIT-licensed [NBA-redzone-ML model](https://huggingface.co/plt3/NBA-redzone-ML), and the project describes its original training and evaluation [here](https://github.com/plt3/NBA-redzone-ML).
+This detector samples video frames locally in mpv and sends nothing to an AI service. It was trained for NBA video and is disabled for other leagues. Try `--ai-ad-observe` first: it shows predictions without muting. In tests with real NBA broadcasts and commercials, the detector also classified some studio and bench coverage as ads. Automatic muting is experimental and may silence game coverage; use mpv's `m` key to override it. The model is a quantized version of the MIT-licensed [NBA-redzone-ML model](https://huggingface.co/plt3/NBA-redzone-ML), and the project describes its original training and evaluation [here](https://github.com/plt3/NBA-redzone-ML).
 
 ### Add-ons and resolver
 
-Press `a` to configure a compatible sports Stremio add-on. For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./sports_live --addon 'https://…/manifest.json'`.
+Press `a` to configure a compatible sports Stremio add-on. For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./sports-cli --addon 'https://…/manifest.json'`.
 
 The PPV helper runs only when needed on `127.0.0.1:38765` and is closed on exit if the app started it. To use a different checkout, press `d` or pass `--resolver-dir /path/to/ppv-hls-proxy`; run `npm install` in that checkout first. Settings are saved with owner-only permissions in `${XDG_CONFIG_HOME:-~/.config}/nba-tui/config.json`. Source-check history does not store media URLs or tokens. The app does not decrypt DRM-protected streams.
 

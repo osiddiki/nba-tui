@@ -17,12 +17,19 @@ if [ ! -f resolver/src/server.js ]; then
   git -C resolver checkout --detach "$commit"
 fi
 npm install --prefix resolver --ignore-scripts --no-audit --no-fund
-if command -v mpv >/dev/null 2>&1; then
-  echo 'Ready: ./sports_live'
-elif [ "$(uname -s)" = Darwin ] && { command -v iina-cli >/dev/null 2>&1 || command -v iina >/dev/null 2>&1 || [ -x /Applications/IINA.app/Contents/MacOS/iina-cli ] || [ -x "$HOME/Applications/IINA.app/Contents/MacOS/iina-cli" ]; }; then
-  echo 'Ready: ./sports_live (press p in the stream list to select IINA)'
-elif [ "$(uname -s)" = Linux ] && command -v celluloid >/dev/null 2>&1; then
-  echo 'Ready: ./sports_live (press p in the stream list to select Celluloid)'
+if command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+  if ! python3 -m pip install --quiet --disable-pip-version-check --no-cache-dir --upgrade --target .deps -r sportscli/requirements.txt; then
+    echo 'RapidFuzz could not be installed; built-in search remains available.' >&2
+  fi
 else
-  echo 'Install mpv, IINA on macOS, or Celluloid on Linux, then run ./sports_live'
+  echo 'Python pip not found; built-in search remains available.' >&2
+fi
+if command -v mpv >/dev/null 2>&1; then
+  echo 'Ready: ./sports-cli'
+elif [ "$(uname -s)" = Darwin ] && { command -v iina-cli >/dev/null 2>&1 || command -v iina >/dev/null 2>&1 || [ -x /Applications/IINA.app/Contents/MacOS/iina-cli ] || [ -x "$HOME/Applications/IINA.app/Contents/MacOS/iina-cli" ]; }; then
+  echo 'Ready: ./sports-cli (press p in the stream list to select IINA)'
+elif [ "$(uname -s)" = Linux ] && command -v celluloid >/dev/null 2>&1; then
+  echo 'Ready: ./sports-cli (press p in the stream list to select Celluloid)'
+else
+  echo 'Install mpv, IINA on macOS, or Celluloid on Linux, then run ./sports-cli'
 fi
