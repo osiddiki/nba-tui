@@ -189,6 +189,8 @@ def extract_player(start_url, max_pages=8, referer=None, *, timeout=15):
         if src and edge and channel and public_url(src.group(1)) and public_url(edge.group(1)) and '/api/playlist-token' in page:
             return {'kind':'relay','url':src.group(1),'edge':edge.group(1),'channel':channel.group(1),'referer':final}
         cleaned=html.unescape(page.replace('\\/','/'))
+        # JSON player options escape '&' as \u0026; keep the query intact.
+        cleaned=re.sub(r'\\u00([0-9a-fA-F]{2})',lambda m: chr(int(m.group(1),16)),cleaned)
         for m in re.finditer(r'unescape\(["\']([^"\']+)["\']\)',cleaned):
             cleaned += '\n'+urllib.parse.unquote(m.group(1))
         for m in re.finditer(r'(?:(?:https?:)?//)[a-zA-Z0-9][^\s"\'<>\\]*?\.m3u8(?:\?[^\s"\'<>\\]*)?',cleaned,re.I):

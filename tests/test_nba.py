@@ -137,6 +137,13 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result['channel'], 'premium982')
         self.assertFalse(providers.public_url('http://127.0.0.1/private'))
 
+    def test_json_escaped_playlist_keeps_its_query(self):
+        page = ('<div data-options="{&quot;hlsManifestUrl&quot;:&quot;https:\\/\\/cdn.example\\/video.m3u8'
+                '?cmd=x\\u0026expires=1\\u0026sig=abc&quot;}"></div>')
+        with patch.object(providers, 'fetch_html', return_value=(page, 'https://player.example/embed/1')):
+            result = providers.extract_player('https://player.example/embed/1')
+        self.assertEqual(result['url'], 'https://cdn.example/video.m3u8?cmd=x&expires=1&sig=abc')
+
     def test_image_wrapped_transport_stream(self):
         ts = b'\x47' + b'\x00'*187 + b'\x47' + b'\x00'*187
         payload = gzip.compress(ts)
