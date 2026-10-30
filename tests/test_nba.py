@@ -112,6 +112,10 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(nba.sf_feeds(listing,self.game), [])
         with patch.object(nba, 'request', return_value={'sources':[active]}):
             self.assertEqual(nba.sf_feeds(listing,self.game)[0].label, 'Source 1 | 1080p | status unknown')
+        objects = {'sources':[{'quality':'FHD','url':active},{'quality':'FHD','url':inactive}],
+                   'live_sources':[{'url':active}]}
+        with patch.object(nba, 'request', return_value=objects):
+            self.assertEqual([f.label for f in nba.sf_feeds(listing,self.game)], ['Source 1 | 1080p | live'])
 
     def test_directory_matches_event_and_skips_other_matchups(self):
         card = f'<a class="card" href="/game/1"><span data-cd="{int(self.start.timestamp())}">Live</span><span>LA Clippers</span><span>Los Angeles Lakers</span></a>'

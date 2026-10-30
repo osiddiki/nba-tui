@@ -86,7 +86,10 @@ python3 -m sportscli.tools.label_frames intervals ~/ad-data/game-frames/tags.jso
 ```
 
 Model-generated tags are useful for training but can confuse promos with paid
-ads. Sparse stills, such as one frame every 45 seconds from a replay, need no
+ads. To record several live games unattended at training resolution, about 100 MB
+per hour each, run `python3 -m sportscli.tools.record_games ~/ad-data/recordings
+nba:Knicks nhl:Jets` before they start; it waits for each game and stops when
+ESPN marks it finished. Sparse stills, such as one frame every 45 seconds from a replay, need no
 video file: list the folder and its `tags.json` as a `frames` entry in the
 manifest. Replay archives usually have commercials cut out, so they add
 coverage, studio and bench examples rather than ads; record live games for

@@ -403,10 +403,13 @@ def sf_feeds(data, game):
         if not re.fullmatch(r'[a-zA-Z0-9_-]+', key):
             continue
         sources = request(SF_ROOT + '/api/v1/sources/' + urllib.parse.quote(key))
+        # Sources were plain URLs and are now {"quality", "url"} objects; accept both.
+        link = lambda item: item.get('url') if isinstance(item, dict) else item
         live_sources = sources.get('live_sources')
-        live = set(live_sources) if isinstance(live_sources, list) else None
+        live = {link(item) for item in live_sources} if isinstance(live_sources, list) else None
         for source in sources.get('sources', [])[:20]:
-            if live is not None and source not in live:
+            source = link(source)
+            if not isinstance(source, str) or (live is not None and source not in live):
                 continue
             parts = urllib.parse.urlsplit(source)
             variant = parts.path.rsplit('/', 1)[-1]

@@ -28,6 +28,7 @@ Run `./sports-cli` in a terminal, or `./sports-cli --list --league nba` for non-
 - `sportscli/breaks.py`: what to show during a detected break: a break-screen OSD overlay (mpv leaves OSD out of the detector's video screenshots) or another live game in a separate, always-on-top corner mpv window resolved ahead of time.
 - `sportscli/tools/export_ad_model.py`: optional developer-only export of the upstream MIT-licensed model using TensorFlow 2.16.2 and Keras 3.3.3; no model files are committed.
 - `sportscli/tools/train_ad_model.py`, `sportscli/tools/label_frames.py`: optional developer-only training of a small int8 multi-sport model from labeled local recordings, and frame sampling/tag conversion for labeling. Never commit recordings, frames, tags or weights.
+- `sportscli/tools/record_games.py`: optional developer-only unattended recording of chosen live games at 384x216 for training; it resolves sources through `App` without a screen and must clean up with `App.close()`.
 - `sportscli/tools/evaluate_ads.py`: offline evaluation against manually labeled local video; see `docs/ad-detector-testing.md` for labels, data splits, and limits.
 - `tests/`: offline tests for discovery, search, playback, relay, player state and UI behavior.
 
