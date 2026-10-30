@@ -1,0 +1,121 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from sportscli import ai_ad_mute, app as nba, tv
+
+PLAYLIST = '''#EXTM3U
+#EXTINF:-1 tvg-id="CNN.us@SD" group-title="News",CNN (720p)
+#EXTVLCOPT:http-referrer=https://player.example/
+#EXTVLCOPT:http-user-agent=Agent/1
+https://cdn.example/cnn/index.m3u8
+#EXTINF:-1 tvg-id="CNBC.us@SD",CNBC (720p) [Geo-blocked]
+https://cdn.example/cnbc.m3u8
+#EXTINF:-1,Late Night 18+ (480p)
+https://cdn.example/adult.m3u8
+#EXTINF:-1,Local Loopback
+http://127.0.0.1/stream.m3u8
+#EXTINF:-1,Radio
+rtmp://cdn.example/radio
+'''
+
+DADDY = '''<a href="/watch.php?id=345"><span>CNN USA</span> ID: 345</a>
+<a class="x" href="/watch.php?id=327">MSNBC
+   ID: 327</a>
+<a href="/watch.php?id=800">6&#039;eren Denmark ID: 800</a>
+<a href="/watch.php?id=501">18+ (Player-01) ID: 501</a>
+<a href="/watch.php?id=345">CNN USA ID: 345</a>
+<a href="/schedule.php">Schedule</a>'''
+
+
+class ChannelTests(unittest.TestCase):
+    def test_playlist_keeps_headers_and_skips_unplayable_entries(self):
+        found = tv.iptv_channels(PLAYLIST)
+        self.assertEqual([name for name, _ in found], ['CNN', 'CNBC'])
+        cnn = found[0][1]
+        self.assertEqual(cnn.kind, 'direct')
+        self.assertEqual(dict(cnn.headers), {'Referer': 'https://player.example/', 'User-Agent': 'Agent/1'})
+        self.assertEqual(cnn.label, '720p')
+        self.assertEqual(found[1][1].label, '720p (may be US-only)')
+        self.assertEqual(found[1][1].headers, ())
+
+    def test_daddylive_list_resolves_stream_pages_on_selection(self):
+        found = tv.daddylive_channels(DADDY, 'https://thedaddy.example/24-7-channels.php')
+        self.assertEqual([name for name, _ in found], ['CNN USA', 'MSNBC', "6'eren Denmark"])
+        cnn = found[0][1]
+        self.assertEqual((cnn.kind, cnn.url, cnn.referer),
+                         ('candidate', 'https://thedaddy.example/stream/stream-345.php',
+                          'https://thedaddy.example/watch.php?id=345'))
+
+    def test_featured_channels_merge_spellings_and_prefer_direct_streams(self):
+        found = tv.daddylive_channels(DADDY, 'https://thedaddy.example/') + tv.iptv_channels(PLAYLIST)
+        channels = tv.group(found)
+        self.assertEqual([c.name for c in channels[:3]], ['CNN', 'CNBC', 'MS NOW'])
+        self.assertTrue(all(c.featured for c in channels[:3]))
+        self.assertEqual([s.provider for s in channels[0].sources], ['iptv-org', 'DaddyLive'])
+        self.assertEqual(channels[-1].name, "6'eren Denmark")
+        self.assertFalse(channels[-1].featured)
+
+    def test_filter_matches_every_word(self):
+        channel = tv.Channel('Fox News Channel')
+        self.assertTrue(tv.matches(channel, 'fox news'))
+        self.assertTrue(tv.matches(channel, ''))
+        self.assertFalse(tv.matches(channel, 'fox business'))
+
+
+class TvModeTests(unittest.TestCase):
+    def test_channel_sources_become_feeds_with_headers_and_referers(self):
+        app = nba.App(None, {})
+        app.current_channel = tv.Channel('CNN', [
+            tv.Source('iptv-org', '720p', 'https://cdn.example/cnn.m3u8', 'direct', (('Referer', 'https://p.example/'),)),
+            tv.Source('DaddyLive', 'channel 345', 'https://d.example/stream/stream-345.php', 'candidate',
+                      referer='https://d.example/watch.php?id=345')])
+        app.feed_context = 'tv'
+        app.feed_workers = [object()]  # keep the test from starting worker threads
+        app.refresh_feeds()
+        _, name, operation = app.feed_jobs.get_nowait()
+        direct, page = operation()
+        self.assertEqual(name, 'Channel sources')
+        self.assertEqual((direct.kind, direct.headers), ('direct', {'Referer': 'https://p.example/'}))
+        self.assertEqual((page.kind, page.metadata), ('candidate', {'referer': 'https://d.example/watch.php?id=345'}))
+
+    def test_channel_list_loads_in_background_and_filters(self):
+        app = nba.App(None, {})
+        app.mode = 'games'
+        channels = [tv.Channel('CNN', [object()], True), tv.Channel('Fox News', [object()], True)]
+        with patch.object(tv, 'directory', return_value=(channels, ['iptv-org: URLError'])):
+            app.open_channels()
+            app.channel_queue.put(app.channel_queue.get(timeout=2))
+            self.assertTrue(app.poll_channels())
+        self.assertEqual(app.mode, 'channels')
+        self.assertEqual(app.tv_return, 'games')
+        self.assertIn('iptv-org: URLError', app.message)
+        app.channel_filter = 'fox'
+        self.assertEqual([c.name for c in app.visible_channels()], ['Fox News'])
+
+    def test_tv_channels_never_start_the_ad_detector(self):
+        class Screen:
+            def refresh(self): pass
+        app = nba.App(Screen(), {}, ai_ad_mute_enabled=True)
+        app.league = 'nba'; app.feed_context = 'tv'; app.render = lambda: None
+        app.resolve_feed = lambda feed: ('https://example.com/cnn.m3u8', {})
+        with patch.object(ai_ad_mute, 'installed', return_value=True), \
+             patch.object(ai_ad_mute, 'Monitor') as monitor, \
+             patch.object(nba.shutil, 'which', return_value='/usr/bin/mpv'), \
+             patch.object(nba.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
+             patch.object(nba.curses, 'def_prog_mode'), patch.object(nba.curses, 'endwin'), \
+             patch.object(nba.curses, 'reset_prog_mode'):
+            app.play(nba.Feed('iptv-org', '720p', kind='direct'))
+        monitor.assert_not_called()
+        self.assertIn('stays off for TV channels', app.message)
+
+    def test_backups_cover_tv_channels(self):
+        app = nba.App(None, {})
+        app.feed_context = 'tv'
+        first, second = nba.Feed('iptv-org', '720p', url='a', kind='direct'), nba.Feed('DaddyLive', 'ch', url='b', kind='candidate')
+        app.feeds = [first, second]
+        self.assertEqual(app.backup_candidates(first), [second])
+
+
+if __name__ == '__main__':
+    unittest.main()

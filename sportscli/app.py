@@ -21,7 +21,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from . import providers, relay, grading, replays, smart_search, players, ad_mute, ai_ad_mute, breaks
+from . import providers, relay, grading, replays, smart_search, players, ad_mute, ai_ad_mute, breaks, tv
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
@@ -58,6 +58,7 @@ HELP_LINES = [
     'NAVIGATE       Up/Down or j/k: move    Enter: select    Esc: back',
     'SCHEDULE       s: sport    [ / ]: date    /: team search    l: Lakers',
     'REPLAYS        R: replay archive    s: sport    /: search titles',
+    'TV             T: live TV channels (CNN, CNBC, MS NOW, Fox News...)    /: filter',
     'SOURCES        f: broadcast side    o: provider    /: search choices',
     'CHECKS         t: test selected source    g: rank by your checks',
     'PLAYBACK       p: player    c: cache    v: terminal video (mpv)',
@@ -791,6 +792,9 @@ class App:
         self.feed_context = 'live'
         self.feed_return = None
         self.current_replay = None
+        self.channels, self.channel_errors, self.channel_filter = [], [], ''
+        self.ci = 0; self.channels_loading = False; self.channels_loaded_at = 0
+        self.channel_queue = queue.Queue(); self.current_channel = None; self.tv_return = 'games'
         self.current_bundle = None
         self.bundle_index = 0
         self.help_return = 'games'
@@ -969,7 +973,7 @@ class App:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         self.put(0, 1, 'SPORTS CLI', self.accent_color)
-        heading = {'search':'Find a game', 'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'replay_sources':'Replay sources', 'feeds':'Broadcasts', 'help':'Help'}
+        heading = {'search':'Find a game', 'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'replay_sources':'Replay sources', 'channels':'Live TV', 'feeds':'Broadcasts', 'help':'Help'}
         self.put(1, 1, heading.get(self.mode, ''), curses.A_BOLD)
         if h < 12 or w < 36:
             self.put(3, 1, 'Please enlarge your terminal to at least 36 x 12.')
@@ -1035,6 +1039,20 @@ class App:
                 self.put(4, 2, 'Searching replay catalogs...' if self.replay_pending else 'No replays found. Try another search or league.')
             self.put(h-4, 1, 'Enter servers   s sport   / search   r refresh')
             self.put(h-3, 1, 'R live games   ? help   q quit')
+        elif self.mode == 'channels':
+            shown = self.visible_channels()
+            self.put(2, 1, f'{len(shown)} channels  |  filter: {self.channel_filter or "all"}')
+            rows = max(1, h-7)
+            start = max(0, self.ci-rows+1)
+            for y, channel in enumerate(shown[start:start+rows], 3):
+                selected = start+y-3 == self.ci
+                count = len(channel.sources)
+                self.put(y, 2, f'{">" if selected else " "} {channel.name}  ({count} source{"s" if count != 1 else ""})',
+                         curses.A_REVERSE if selected else curses.A_BOLD if channel.featured else 0)
+            if not shown:
+                self.put(4, 2, 'Loading channels...' if self.channels_loading else 'No channels match. Press / to change the filter.')
+            self.put(h-4, 1, 'Enter sources   / filter   r refresh')
+            self.put(h-3, 1, 'T or Esc back   ? help   q quit')
         elif self.mode == 'replay_sources':
             self.put(2, 1, self.current_bundle.title)
             rows = max(1, h-7)
@@ -1047,6 +1065,9 @@ class App:
             if self.feed_context == 'replay':
                 self.put(2, 1, self.current_replay.title)
                 self.put(3, 1, f'Replay servers from {self.current_replay.source}')
+            elif self.feed_context == 'tv':
+                self.put(2, 1, self.current_channel.name)
+                self.put(3, 1, 'Live TV')
             else:
                 game = self.games[self.gi]
                 self.put(2, 1, f'{game.title}  |  {game.start.astimezone().strftime("%a %b %d %I:%M %p %Z")}')
@@ -1586,10 +1607,48 @@ class App:
             elif self.replay_errors: self.message += ' | ' + ', '.join(self.replay_errors)
         return changed
 
+    def visible_channels(self):
+        return [channel for channel in self.channels if tv.matches(channel, self.channel_filter)]
+
+    def open_channels(self):
+        self.tv_return = self.mode if self.mode in ('leagues', 'games') else 'games'
+        self.mode = 'channels'; self.ci = 0
+        # Channel lists change slowly; reuse one for ten minutes.
+        if not self.channels or time.monotonic() - self.channels_loaded_at > 600: self.refresh_channels()
+        else: self.message = f'{len(self.channels)} channels.'
+
+    def refresh_channels(self):
+        if self.channels_loading: return
+        self.channels_loading = True; self.message = 'Loading live TV channels...'
+        def worker():
+            try: result = tv.directory()
+            except Exception as exc: result = ([], [type(exc).__name__])
+            self.channel_queue.put(result)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def poll_channels(self):
+        try: channels, errors = self.channel_queue.get_nowait()
+        except queue.Empty: return False
+        self.channels_loading = False
+        if channels or not self.channels:
+            self.channels, self.channel_errors = channels, errors; self.channels_loaded_at = time.monotonic()
+        self.ci = min(self.ci, max(0, len(self.visible_channels())-1))
+        if self.mode == 'channels':
+            self.message = f'{len(self.channels)} channels' + (' | ' + ', '.join(errors) if errors else '')
+        return True
+
     def refresh_feeds(self):
         self.feed_generation += 1
         generation = self.feed_generation
-        if self.feed_context == 'replay':
+        if self.feed_context == 'tv':
+            channel = self.current_channel
+            def channel_sources():
+                return [Feed(source.provider, source.label, url=source.url, kind=source.kind, headers=dict(source.headers),
+                             note='resolved when selected' if source.kind == 'candidate' else '',
+                             metadata={'referer': source.referer} if source.referer else {})
+                        for source in channel.sources]
+            tasks = [('Channel sources', channel_sources)]
+        elif self.feed_context == 'replay':
             item = self.current_replay
             def replay_servers():
                 return [Feed(item.source, server.label, url=server.url, kind='candidate',
@@ -1898,8 +1957,10 @@ class App:
                 ad_note = ' Ad mute is available only for marked replays.'
         ai_requested = self.ai_ad_mute or self.ai_ad_observe
         leagues = ai_ad_mute.supported_leagues() if ai_requested else set()
-        ai_active = ai_requested and self.league in leagues
-        if ai_requested and not ai_active:
+        ai_active = ai_requested and self.feed_context != 'tv' and self.league in leagues
+        if ai_requested and self.feed_context == 'tv':
+            ad_note = ' AI ad detection is for sports broadcasts and stays off for TV channels.'
+        elif ai_requested and not ai_active:
             ad_note = (' AI ad mute is currently limited to NBA broadcasts.' if leagues == {'nba'}
                        else ' The installed ad model was not trained on this league.')
         temporary, monitor, preview = None, None, None
@@ -2004,7 +2065,7 @@ class App:
 
     def backup_candidates(self, feed):
         """Other live sources for the same broadcast side, reachable ones first."""
-        if not self.dual_stream or self.feed_context != 'live' or feed.kind in ('web', 'ppv'): return []
+        if not self.dual_stream or self.feed_context not in ('live', 'tv') or feed.kind in ('web', 'ppv'): return []
         def status(item): return self.manual_status.get(id(item), self.auto_checks.get(id(item)))
         # A home and an away feed have different commentary, so never splice between them.
         options = [item for item in self.feeds if item is not feed and id(item) not in self.hidden_feeds
@@ -2197,7 +2258,7 @@ class App:
         try:
             while True:
                 self.poll_games(); self.poll_global_search(); self.poll_player_search(); self.start_global_search(); self.start_player_search(); self.poll_search_preview()
-                self.poll_replays(); self.poll_feeds(); self.poll_auto_checks(); self.poll_manual_checks(); self.cancel_feed_action_if_changed(); self.poll_feed_actions(); self.poll_gui_players(); self.render(); key, typed = self.read_key()
+                self.poll_replays(); self.poll_channels(); self.poll_feeds(); self.poll_auto_checks(); self.poll_manual_checks(); self.cancel_feed_action_if_changed(); self.poll_feed_actions(); self.poll_gui_players(); self.render(); key, typed = self.read_key()
                 if key == -1: continue
                 if self.mode == 'search':
                     if key in (17, 24): break  # Ctrl-Q or Ctrl-X
@@ -2251,12 +2312,14 @@ class App:
                     if self.mode == 'leagues': self.league_index = max(0, self.league_index-1)
                     elif self.mode == 'games': self.gi = max(0, self.gi-1)
                     elif self.mode == 'replays': self.ri = max(0, self.ri-1); self.replay_selection_touched = True
+                    elif self.mode == 'channels': self.ci = max(0, self.ci-1)
                     elif self.mode == 'replay_sources': self.bundle_index = max(0, self.bundle_index-1)
                     else: self.fi = max(0, self.fi-1); self.feed_selection_touched = True
                 elif key in (curses.KEY_DOWN, ord('j')):
                     if self.mode == 'leagues': self.league_index = min(len(LEAGUES)-1, self.league_index+1)
                     elif self.mode == 'games': self.gi = min(max(0,len(self.games)-1), self.gi+1)
                     elif self.mode == 'replays': self.ri = min(max(0,len(self.replays)-1), self.ri+1); self.replay_selection_touched = True
+                    elif self.mode == 'channels': self.ci = min(max(0,len(self.visible_channels())-1), self.ci+1)
                     elif self.mode == 'replay_sources': self.bundle_index = min(len(self.current_bundle.sources)-1, self.bundle_index+1)
                     else: self.fi = min(max(0,len(self.visible_feeds())-1), self.fi+1); self.feed_selection_touched = True
                 elif key in (10,13,curses.KEY_ENTER):
@@ -2274,6 +2337,10 @@ class App:
                         self.current_replay = self.replays[self.ri]; self.replay_selection_touched = True
                         self.feed_return = None; self.feed_context = 'replay'; self.mode = 'feeds'; self.filter = 'all'
                         self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
+                    elif self.mode == 'channels' and self.visible_channels():
+                        self.current_channel = self.visible_channels()[self.ci]
+                        self.feed_return = 'channels'; self.feed_context = 'tv'; self.mode = 'feeds'; self.filter = 'all'
+                        self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
                     elif self.mode == 'replay_sources' and self.current_bundle.sources:
                         self.current_replay = self.current_bundle.sources[self.bundle_index]
                         self.league = self.current_bundle.league
@@ -2283,7 +2350,10 @@ class App:
                         self.feed_selection_touched = True; self.begin_feed_action(self.visible_feeds()[self.fi], 'play')
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'feeds':
                     self.feed_generation += 1; self.feed_pending = 0
-                    if self.feed_return in ('search', 'replay_sources'):
+                    if self.feed_return == 'channels':
+                        self.mode = 'channels'; self.feed_return = None; self.feed_generation += 1
+                        self.message = 'Select a channel.'
+                    elif self.feed_return in ('search', 'replay_sources'):
                         self.mode = self.feed_return; self.feed_return = None
                         if self.mode == 'search': self.rebuild_global_results()
                         else: self.message = 'Choose a replay source.'
@@ -2306,6 +2376,15 @@ class App:
                     self.league_return = 'replays' if (self.mode in ('replays', 'replay_sources') or
                         (self.mode == 'feeds' and self.feed_context == 'replay')) else 'games'
                     self.mode = 'leagues'; self.message = 'Choose a sport or league.'
+                elif self.mode in ('leagues', 'games') and key == ord('T'):
+                    self.open_channels()
+                elif self.mode == 'channels' and key in (27, curses.KEY_BACKSPACE, 127, ord('h'), ord('T')):
+                    self.mode = self.tv_return; self.message = 'Returned to list.'
+                elif self.mode == 'channels' and key == ord('/'):
+                    self.channel_filter = self.prompt('Filter channels (blank shows all):', self.channel_filter).strip()
+                    self.ci = 0; self.message = f'{len(self.visible_channels())} channels shown.'
+                elif self.mode == 'channels' and key == ord('r'):
+                    self.refresh_channels()
                 elif self.mode == 'games' and key == ord('R'):
                     self.mode = 'replays'; self.replay_search = ''; self.refresh_replays()
                 elif self.mode in ('games', 'feeds', 'replays') and key == ord('r'):

@@ -8,6 +8,7 @@ import http.server
 import io
 import json
 import secrets
+import sys
 import socket
 import ssl
 import struct
@@ -21,6 +22,13 @@ from . import merge
 
 UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 MAX_SEGMENT = 24 * 1024 * 1024
+
+
+class _Server(http.server.ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        # Players drop kept-alive connections when they quit; that is not an error worth printing.
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)): return
+        super().handle_error(request, client_address)
 
 
 class _Pool:
@@ -399,7 +407,7 @@ class Relay:
                         self.send_response(502); self.send_header('Content-Type','text/plain')
                         self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
                     except (BrokenPipeError, ConnectionResetError): pass
-        self.http = http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        self.http = _Server(('127.0.0.1',0),Handler)
         self.http.daemon_threads = True
         self.base = f'http://127.0.0.1:{self.http.server_port}'
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True); self.thread.start()

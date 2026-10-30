@@ -155,5 +155,24 @@ class BackupSelectionTest(unittest.TestCase):
         self.assertEqual(app.stream_notes['http://127.0.0.1:1/m/x.m3u8'], ' Backup: B.')
 
 
+
+
+class RelayServerTests(unittest.TestCase):
+    def test_player_dropping_a_kept_alive_connection_prints_nothing(self):
+        import contextlib, io, socket, struct, time
+        from sportscli import relay
+        server = relay.Relay(); errors = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(errors):
+                connection = socket.create_connection(('127.0.0.1', server.http.server_port))
+                connection.sendall(b'GET /missing HTTP/1.1\r\nHost: test\r\n\r\n'); connection.recv(1000)
+                # An abortive close resets the connection while the handler waits for the next request.
+                connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0)); connection.close()
+                time.sleep(.3)
+        finally:
+            server.close()
+        self.assertEqual(errors.getvalue(), '')
+
+
 if __name__ == '__main__':
     unittest.main()
