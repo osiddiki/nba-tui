@@ -1096,7 +1096,7 @@ class App:
             if ad_mode != 'off': context.append(f'ad mute: {ad_mode}')
             if self.ai_ad_mute and self.ad_breaks != 'mute': context.append('breaks: ' + breaks.LABELS[self.ad_breaks])
             if self.rank_by_checks: context.append('ranked')
-            if not self.dual_stream and self.feed_context == 'live': context.append('backup: off')
+            if not self.dual_stream and self.feed_context in ('live', 'tv'): context.append('backup: off')
             self.put(4, 1, '  ·  '.join(context), curses.A_DIM)
             self.fi = min(self.fi, max(0, len(fs)-1))
             compact = w < 65

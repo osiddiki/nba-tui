@@ -10,7 +10,7 @@ python3 -m py_compile sports-cli sportscli/*.py sportscli/tools/*.py
 sh -n setup.sh
 ```
 
-Run `./sports-cli` in a terminal, or `./sports-cli --list --league nba` for non-interactive output. Live provider tests depend on current games, upstream availability, and network access; keep deterministic fixtures in the unit tests and report which real-player or live checks were possible.
+To prove a change in the real app, use the project skill `.claude/skills/verify-sports-cli` (a pseudo-terminal driver with a feature map); `scripts/run_all.sh` drives every mapped feature and needs a network without a sandbox proxy. Run `./sports-cli` in a terminal, or `./sports-cli --list --league nba` for non-interactive output. Live provider tests depend on current games, upstream availability, and network access; keep deterministic fixtures in the unit tests and report which real-player or live checks were possible.
 
 ## Code map
 
