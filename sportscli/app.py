@@ -845,6 +845,7 @@ class App:
         self.terminal_video = bool(config.get('terminal_video', False))
         self.dual_stream = config.get('dual_stream', True) is not False
         self.stream_notes = {}
+        self.record_dir = None
         self.ad_mute = ad_mute_enabled
         self.ai_ad_mute = ai_ad_mute_enabled
         self.ai_ad_observe = ai_ad_observe_enabled
@@ -1897,6 +1898,11 @@ class App:
                        else ' The installed ad model was not trained on this league.')
         temporary, monitor = None, None
         command = mpv_command(url, headers, cache=self.cache, terminal_video=self.terminal_video)
+        if self.record_dir:
+            # mpv writes the stream it receives, so nothing is downloaded twice.
+            name = re.sub(r'[^A-Za-z0-9]+', '-', f'{self.league}-{feed.source}-{dt.datetime.now():%Y%m%d-%H%M%S}').strip('-')
+            command.insert(1, '--stream-record=' + str(self.record_dir / (name + '.ts')))
+            ad_note += f' Recording to {self.record_dir}.'
         if intervals or ai_active:
             try:
                 temporary = tempfile.TemporaryDirectory(prefix='sports-mpv-', dir='/tmp')
@@ -2356,7 +2362,13 @@ def main():
     mute.add_argument('--ai-ad-mute', action='store_true', help='Use the optional experimental local NBA ad detector in mpv')
     mute.add_argument('--ai-ad-observe', action='store_true', help='Show NBA ad predictions without changing audio')
     parser.add_argument('--install-ad-model', action='store_true', help='Explicitly download and install the optional local NBA ad detector')
+    parser.add_argument('--record', metavar='DIR', type=pathlib.Path,
+                        help='Save what mpv plays to DIR for this run, e.g. to label ad-detector training footage')
     args = parser.parse_args(); config = load_config()
+    if args.record:
+        try: args.record.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f'Cannot use recording folder: {exc}', file=sys.stderr); return 2
     if args.install_ad_model: return ai_ad_mute.install()
     if (args.ai_ad_mute or args.ai_ad_observe) and not ai_ad_mute.installed():
         print('AI ad detector not installed. Run ./sports-cli --install-ad-model first.', file=sys.stderr)
@@ -2388,6 +2400,7 @@ def main():
         def run_ui(screen):
             app = App(screen, config, ad_mute_enabled=args.ad_mute, ai_ad_mute_enabled=args.ai_ad_mute,
                       ai_ad_observe_enabled=args.ai_ad_observe)
+            app.record_dir = args.record
             if args.search:
                 app.mode = 'search'; app.search_return = 'leagues'
                 app.message = 'Start typing a team, matchup, or league.'

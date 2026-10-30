@@ -126,7 +126,7 @@ The install downloads the original 150 MB model and conversion packages, verifie
 
 This detector samples video frames locally in mpv and sends nothing to an AI service. It was trained for NBA video and is disabled for other leagues. Try `--ai-ad-observe` first: it shows predictions without muting. In tests with real NBA broadcasts and commercials, the detector also classified some studio and bench coverage as ads. Automatic muting is experimental and may silence game coverage; use mpv's `m` key to override it. The model is a quantized version of the MIT-licensed [NBA-redzone-ML model](https://huggingface.co/plt3/NBA-redzone-ML), and the project describes its original training and evaluation [here](https://github.com/plt3/NBA-redzone-ML).
 
-For developers comparing detectors against labeled local recordings, or training a small multi-sport model, see [ad detector testing](docs/ad-detector-testing.md). An installed trained model enables AI detection for the leagues it was trained on.
+To collect footage for your own detector, start with `./sports-cli --record ~/ad-data/recordings`; mpv saves each stream you play there, including commercials. Recordings stay on your machine and must never be committed. For developers comparing detectors against labeled local recordings, or training a small multi-sport model, see [ad detector testing](docs/ad-detector-testing.md). An installed trained model enables AI detection for the leagues it was trained on.
 
 ### Add-ons and resolver
 
