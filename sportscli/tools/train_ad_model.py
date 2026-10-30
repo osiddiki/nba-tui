@@ -121,7 +121,10 @@ def load_dataset(manifest, every, teacher, promo, teacher_weight):
 
 def split(recordings, holdout):
     names = sorted({r['broadcast'] for r in recordings})
-    if holdout: held = set(holdout)
+    if holdout:
+        held = set(holdout)
+        unknown = held - set(names)
+        if unknown: raise ValueError("Unknown held-out broadcasts: " + ", ".join(sorted(unknown)))
     elif len(names) < 2: held = set()
     else: held = set(names[::5] if len(names) >= 5 else names[-1:])
     return [r for r in recordings if r['broadcast'] not in held], [r for r in recordings if r['broadcast'] in held]
@@ -131,7 +134,7 @@ def build(alpha):
     import tensorflow as tf
     backbone = tf.keras.applications.MobileNetV3Small(
         input_shape=(*STUDENT_SIZE, 3), include_top=False, weights='imagenet', alpha=alpha,
-        minimalistic=True, include_preprocessing=True, pooling='avg')
+        minimalistic=(alpha == 1.0), include_preprocessing=True, pooling='avg')
     inputs = tf.keras.Input((*STUDENT_SIZE, 3))
     features = backbone(inputs)
     outputs = tf.keras.layers.Dense(1, activation='sigmoid')(tf.keras.layers.Dropout(.2)(features))
@@ -235,18 +238,19 @@ def main(argv=None):
     parser.add_argument('--holdout', nargs='*', default=None, help='broadcast names to evaluate on')
     parser.add_argument('--promo', choices=('ignore', 'ad', 'broadcast'), default='ignore',
                         help='how to train on network promos (default: leave them out)')
-    parser.add_argument('--teacher-weight', type=float, default=.3,
-                        help='weight of the original model on unlabeled time; 0 disables it')
+    parser.add_argument('--teacher-weight', type=float, default=0.0,
+                        help='explicitly opt into original-model soft labels; default 0 uses human labels only')
     parser.add_argument('--install', action='store_true',
                         help='make the result the active detector for --ai-ad-mute')
     args = parser.parse_args(argv)
     if not shutil.which('ffmpeg'): raise SystemExit('ffmpeg is required.')
     _, original = ai_ad_mute.installation_paths()
     original = original.with_name('nba-ads-v1.tflite')
-    teacher = load_teacher(original) if original.is_file() else None
-    if teacher is None: print('Original model not installed; training uses labeled frames only.')
+    teacher = load_teacher(original) if original.is_file() and args.teacher_weight > 0 else None
+    if teacher is None: print('Teacher disabled or unavailable; training uses labeled frames only.')
     recordings = load_dataset(args.manifest, args.every, teacher, args.promo, args.teacher_weight)
     train_set, held = split(recordings, args.holdout)
+    if args.install and not held: raise SystemExit('Installation requires a held-out broadcast for evaluation.')
     if not train_set: raise SystemExit('Every broadcast is held out; nothing is left to train on.')
     print(f'Training on {len(train_set)} broadcasts; evaluating on {len(held)}.', flush=True)
     model, sample = train(train_set, args.epochs, args.alpha, args.batch)

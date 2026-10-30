@@ -340,8 +340,8 @@ def get_team_games(team_id, league, today=None):
 
 
 def search_replay_pages(spec, team, opponent='', date=None, canceled=lambda: False):
-    """Look a few pages deeper only for a specific NBA matchup or date."""
-    found = []
+    """Read bounded archive pages for a team; stop early for a specific game."""
+    found, seen = [], set()
     for page in range(2, 7):
         if canceled(): raise concurrent.futures.CancelledError()
         separator = '&' if urllib.parse.urlsplit(spec[1]).query else '?'
@@ -352,8 +352,9 @@ def search_replay_pages(spec, team, opponent='', date=None, canceled=lambda: Fal
             if smart_search.normalize(team) not in title: continue
             if opponent and smart_search.normalize(opponent) not in title: continue
             if date and smart_search.replay_date(item.title) != date: continue
-            found.append(item)
-        if found: break
+            if item.url not in seen:
+                seen.add(item.url); found.append(item)
+        if found and (opponent or date): break
     return found
 
 
@@ -1284,7 +1285,8 @@ class App:
                     sources.setdefault(key, []).append(league)
                     if key not in work: work.append(key)
             # A specific matchup/date can require searching beyond the recent catalog.
-            if (query.date or len(query.fragments) > 1) and self.search_plan.primary:
+            exact_team = bool(query.fragments and any(score >= .99 for _, score in self.search_index.resolve(query.fragments[0])))
+            if self.search_plan.primary and (query.date or len(query.fragments) > 1 or exact_team):
                 term = smart_search.archive_search_term(self.search_plan.primary)
                 for league in self.search_plan.leagues:
                     for spec in replays.catalogs(league):
@@ -1379,7 +1381,7 @@ class App:
             if all(item.url != hit.item.url for item in bundles[identity].sources):
                 bundles[identity].sources.append(hit.item)
         ordered = sorted(bundles.values(), key=lambda bundle: bundle.date or dt.date.min, reverse=True)
-        limit = 2 if len(self.search_plan.query.fragments) == 1 and self.search_plan.query.date is None else 10
+        limit = 10
         result.extend(ReplayBundleHit(bundle) for bundle in ordered[:limit])
         result.extend(upcoming[:2] if len(self.search_plan.query.fragments) == 1 else upcoming)
         result.extend(hit for hit in hits if hit.kind == 'team' and

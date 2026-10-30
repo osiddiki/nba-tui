@@ -141,6 +141,18 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(rows, [replay])
         self.assertEqual(fetch.call_count, 3)
 
+    def test_team_archive_lookup_keeps_games_from_later_pages(self):
+        spec = ('Basketball Video', 'https://basketball-video.com/2026-27', 'nba')
+        def listing(page_spec):
+            page = page_spec[1].split('?page')[-1]
+            return [replays.Replay('Basketball Video', 'Lakers vs Jazz NBA October '+page+', 2026',
+                                   'https://example.com/game-'+page)]
+        with patch.object(replays, 'listing', side_effect=listing) as fetch:
+            rows = nba.search_replay_pages(spec, 'Lakers')
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(fetch.call_count, 5)
+        self.assertEqual(len({r.url for r in rows}), 5)
+
     def test_matchup_replay_lookup_stops_when_query_changes(self):
         spec = ('Basketball Video','https://basketball-video.com/2026-27','nba')
         with patch.object(replays, 'listing') as fetch:

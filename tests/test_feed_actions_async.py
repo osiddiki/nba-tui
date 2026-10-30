@@ -8,7 +8,7 @@ from sportscli import app as nba
 
 class FeedActionTests(unittest.TestCase):
     def setUp(self):
-        self.app = nba.App(None, {})
+        self.app = nba.App(None, {'dual_stream': False})
         self.app.mode = 'feeds'; self.app.feed_generation = 1
         self.first = nba.Feed('Example', 'First', url='https://example.com/one', kind='direct')
         self.second = nba.Feed('Example', 'Second', url='https://example.com/two', kind='direct')

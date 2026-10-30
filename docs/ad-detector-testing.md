@@ -102,8 +102,8 @@ environment:
 python -m sportscli.tools.train_ad_model ~/ad-data/dataset.json --output ~/ad-data/ad-model.tflite
 ```
 
-The tool holds out whole broadcasts, uses the original model's scores as soft
-labels for unlabeled time when it is installed, and prints held-out mute counts
+The tool holds out whole broadcasts, uses only explicit labels by default. Pass `--teacher-weight 0.3` to opt into
+the original model's soft labels for unlabeled time when it is installed, and prints held-out mute counts
 for both models using the playback decision logic. `--install` makes the result
 the active detector and enables AI detection for its leagues; delete
 `ad-model.tflite` from the detector directory to restore the original.
