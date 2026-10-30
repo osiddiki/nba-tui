@@ -66,6 +66,41 @@ image, where lower scores indicate possible ads. The test uses the current
 playback thresholds, so do not compare scores from differently calibrated
 models as if they were probabilities.
 
+## Train a smaller model
+
+`sportscli/tools/train_ad_model.py` fine-tunes an int8 MobileNetV3-Small at
+256×144. On an Apple M2 the exported model is about 0.6 MB and classifies a
+frame in about 2 ms, compared with 22 MB and about 280 ms for the original
+VGG16 model. Those numbers come from the export pipeline; they say nothing
+about accuracy, which depends entirely on the training footage.
+
+Label recordings from several sports and networks. Commercials look similar
+across sports, and studio, bench and sideline coverage from other sports
+teaches the model what is not an ad. To label quickly, sample frames and tag
+each one, by hand or with a vision model, then merge the tags:
+
+```sh
+python3 -m sportscli.tools.label_frames extract game.mp4 ~/ad-data/game-frames --every 2
+# write ~/ad-data/game-frames/tags.json: {"00000000.0.jpg": "broadcast", ...}
+python3 -m sportscli.tools.label_frames intervals ~/ad-data/game-frames/tags.json ~/ad-data/game.json
+```
+
+Model-generated tags are useful for training but can confuse promos with paid
+ads. Check the labels of the held-out broadcasts yourself so the evaluation
+remains trustworthy. List the recordings in a manifest (see the module
+docstring), then train with TensorFlow 2.16 and Pillow in a separate
+environment:
+
+```sh
+python -m sportscli.tools.train_ad_model ~/ad-data/dataset.json --output ~/ad-data/ad-model.tflite
+```
+
+The tool holds out whole broadcasts, uses the original model's scores as soft
+labels for unlabeled time when it is installed, and prints held-out mute counts
+for both models using the playback decision logic. `--install` makes the result
+the active detector and enables AI detection for its leagues; delete
+`ad-model.tflite` from the detector directory to restore the original.
+
 ## Experiments so far
 
 We evaluated the current quantized NBA model and playback decision logic at

@@ -1,38 +1,113 @@
 """Local, session-scoped HLS relay for players that serve image-wrapped segments."""
 from __future__ import annotations
+import concurrent.futures
 import gzip
 import hashlib
+import http.client
 import http.server
 import io
 import json
 import secrets
+import socket
+import ssl
 import struct
 import threading
 import time
 import urllib.parse
 import urllib.error
-import urllib.request
 import zlib
+
+from . import merge
 
 UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 MAX_SEGMENT = 24 * 1024 * 1024
 
 
-def _download(url, referer, timeout=15, limit=MAX_SEGMENT):
-    origin = urllib.parse.urlsplit(referer)
-    headers = {'User-Agent': UA, 'Referer': referer, 'Origin': f'{origin.scheme}://{origin.netloc}', 'Accept':'*/*'}
-    req = urllib.request.Request(url, headers=headers)
-    for attempt in range(3):
+class _Pool:
+    """Keep-alive HTTP connections, so each segment skips a fresh TCP and TLS handshake."""
+    def __init__(self, per_host=4):
+        self.idle = {}; self.lock = threading.Lock(); self.per_host = per_host
+        self.context = ssl.create_default_context()
+
+    def _take(self, key):
+        with self.lock:
+            connections = self.idle.get(key)
+            return connections.pop() if connections else None
+
+    def _give(self, key, connection):
+        with self.lock:
+            connections = self.idle.setdefault(key, [])
+            if len(connections) < self.per_host: connections.append(connection); return
+        connection.close()
+
+    def request(self, url, headers, timeout, limit):
+        for _ in range(6):
+            parts = urllib.parse.urlsplit(url)
+            if parts.scheme not in ('http', 'https') or not parts.hostname: raise ValueError('unsupported URL')
+            key = (parts.scheme, parts.hostname, parts.port)
+            target = (parts.path or '/') + ('?' + parts.query if parts.query else '')
+            fresh = False
+            while True:
+                connection = None if fresh else self._take(key)
+                if connection is None:
+                    fresh = True
+                    if parts.scheme == 'https':
+                        connection = http.client.HTTPSConnection(parts.hostname, parts.port, timeout=timeout, context=self.context)
+                    else:
+                        connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout)
+                else:
+                    connection.timeout = timeout
+                    if connection.sock: connection.sock.settimeout(timeout)
+                try:
+                    connection.request('GET', target, headers=headers)
+                    response = connection.getresponse()
+                    data = response.read(limit + 1)
+                except (http.client.HTTPException, OSError) as exc:
+                    connection.close()
+                    # An idle keep-alive connection may have been closed by the server.
+                    if not fresh: fresh = True; continue
+                    if isinstance(exc, (TimeoutError, socket.timeout)): raise TimeoutError(str(exc)) from exc
+                    raise urllib.error.URLError(exc) from exc
+                break
+            if len(data) > limit or response.will_close: connection.close()
+            else: self._give(key, connection)
+            location = response.getheader('Location')
+            if response.status in (301, 302, 303, 307, 308) and location:
+                url = urllib.parse.urljoin(url, location); continue
+            if response.status >= 400:
+                raise urllib.error.HTTPError(url, response.status, response.reason, response.headers, io.BytesIO(data))
+            return data
+        raise urllib.error.URLError('too many redirects')
+
+    def close(self):
+        with self.lock:
+            connections = [c for group in self.idle.values() for c in group]; self.idle.clear()
+        for connection in connections: connection.close()
+
+
+_POOL = _Pool()
+
+
+def _request(url, headers, timeout, limit):
+    return _POOL.request(url, headers, timeout, limit)
+
+
+def _download(url, referer=None, timeout=15, limit=MAX_SEGMENT, *, headers=None, attempts=3):
+    if headers is None:
+        origin = urllib.parse.urlsplit(referer)
+        headers = {'User-Agent': UA, 'Referer': referer, 'Origin': f'{origin.scheme}://{origin.netloc}', 'Accept':'*/*'}
+    else:
+        headers = {'User-Agent': UA, 'Accept': '*/*', **headers}
+    for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as res:
-                data = res.read(limit + 1)
+            data = _request(url, headers, timeout, limit)
             break
         except urllib.error.HTTPError as exc:
             # A rejected playlist token is handled separately by Relay.get.
-            if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == attempts - 1:
                 raise
         except (urllib.error.URLError, TimeoutError):
-            if attempt == 2:
+            if attempt == attempts - 1:
                 raise
         time.sleep(.2 * (attempt + 1))
     if len(data) > limit: raise ValueError('response too large')
@@ -120,11 +195,197 @@ def unwrap_segment(data):
     return data
 
 
+def _media(data):
+    """Unwrap image-wrapped transport streams; pass other media through unchanged."""
+    if data[:1] == b'\x47': return data
+    if data.lstrip()[:1] == b'<': raise ValueError('received a web page instead of media')
+    try: return unwrap_segment(data)
+    except ValueError:
+        if data.startswith((b'\x89PNG', b'RIFF')): raise
+        return data
+
+
+class Merged:
+    """Download live segments ahead of the player and fail over between equivalent sources."""
+    IDLE = 45          # stop downloading when the player has not asked for a playlist
+    CACHE_BYTES = 192 * 1024 * 1024
+
+    def __init__(self, relay, sid, sources):
+        self.relay, self.sid = relay, sid
+        # Each source: page URL, headers, resolved media playlist URL, last playlist, health.
+        self.sources = [{'url':url, 'headers':headers or {}, 'media':None, 'playlist':None,
+                         'advanced':time.monotonic(), 'newest':None, 'failures':0} for url, headers in sources]
+        self.active = 0
+        self.timeline = merge.Timeline()
+        self.cache = {}; self.cache_bytes = 0
+        self.lock = threading.Condition()
+        self.stopped = threading.Event()
+        self.requested = time.monotonic()
+        self.thread = None
+        self.error = None
+        self.switches = 0
+        self.failed = {}
+
+    def fetch(self, url, headers, timeout, limit=MAX_SEGMENT, attempts=2):
+        if url.startswith(self.relay.base + '/'):
+            # Wrapped and tokenized sources already live in this relay.
+            return self.relay.get(url[len(self.relay.base):])[0]
+        return _download(url, headers=headers, timeout=timeout, limit=limit, attempts=attempts)
+
+    def load(self, index):
+        source = self.sources[index]
+        timeout = 6 if source['playlist'] is None else max(3, min(8, source['playlist'].target))
+        for _ in range(2):
+            url = source['media'] or source['url']
+            text = self.fetch(url, source['headers'], timeout, limit=1_000_000).decode('utf8', 'replace')
+            variant = merge.variant_url(text, url)
+            if variant is None:
+                source['media'] = url
+                playlist = merge.parse_media(text, url)
+                break
+            source['media'] = variant
+        else:
+            raise merge.Unsupported('nested master playlists')
+        if playlist.endlist: raise merge.Unsupported('not a live playlist')
+        newest = playlist.segments[-1].seq if playlist.segments else None
+        if newest != source['newest']: source['advanced'] = time.monotonic(); source['newest'] = newest
+        source['playlist'] = playlist; source['failures'] = 0
+        return playlist
+
+    def healthy(self, index):
+        source = self.sources[index]; playlist = source['playlist']
+        if playlist is None or source['failures'] >= 2: return False
+        # Fail over before the player's buffer runs out; a healthy backup makes switching cheap.
+        return time.monotonic() - source['advanced'] < max(3, 1.5 * playlist.target + .5)
+
+    def prepare(self):
+        """Check each source once; return how many can be merged. The primary must work."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.sources)) as pool:
+            results = list(pool.map(lambda i: self._try_load(i), range(len(self.sources))))
+        if not results[0]: return 0
+        self.sources = [s for s, ok in zip(self.sources, results) if ok]
+        return len(self.sources)
+
+    def _try_load(self, index):
+        try: self.load(index); return True
+        except (OSError, ValueError, UnicodeError, urllib.error.URLError): return False
+
+    def start(self):
+        with self.lock:
+            if self.thread and self.thread.is_alive(): return
+            self.requested = time.monotonic(); self.error = None
+            self.thread = threading.Thread(target=self.run, daemon=True); self.thread.start()
+
+    def stop(self): self.stopped.set()
+
+    def switch(self, reason):
+        for offset in range(1, len(self.sources)):
+            candidate = (self.active + offset) % len(self.sources)
+            if self.healthy(candidate):
+                self.active = candidate; self.switches += 1
+                return True
+        return False
+
+    def run(self):
+        while not self.stopped.is_set():
+            if time.monotonic() - self.requested > self.IDLE: return
+            started = time.monotonic()
+            for index in range(len(self.sources)):
+                try:
+                    playlist = self.load(index)
+                    if index == self.timeline.last_source: self.timeline.observe(index, playlist)
+                except (OSError, ValueError, UnicodeError, urllib.error.URLError):
+                    self.sources[index]['failures'] += 1
+            if not self.healthy(self.active): self.switch('stalled')
+            progressed = self.pump()
+            target = (self.sources[self.active]['playlist'] or merge.Playlist(4, [], False)).target
+            if not progressed:
+                self.stopped.wait(max(.5, min(3, target / 2) - (time.monotonic() - started)))
+
+    def alternates(self, segment):
+        for index, source in enumerate(self.sources):
+            if index == self.active or not source['playlist']: continue
+            for other in source['playlist'].segments:
+                if other.name == segment.name: yield source, other.url
+
+    def align(self, source, segments, plan):
+        """Use transport-stream timestamps to resume exactly when both sources share a clock."""
+        first = plan[0][0]
+        try: data = _media(self.fetch(first.url, source['headers'], max(4, min(15, first.duration * 1.5))))
+        except (OSError, ValueError, urllib.error.URLError): return plan, {}
+        measured, expected = merge.first_pts(data), self.timeline.end_pts
+        # Unrelated encoders have unrelated clocks; keep the live-edge estimate then.
+        if measured is None or abs(merge.pts_seconds(expected, measured)) > 90: return plan, {first.url: data}
+        position = segments.index(first)
+        best = merge.realign(segments, position, measured, expected)
+        if best >= len(segments): return [], {}
+        aligned = [(segment, i == 0 or segment.discontinuity) for i, segment in enumerate(segments[best:])]
+        return aligned, ({first.url: data} if best == position else {})
+
+    def pump(self):
+        source = self.sources[self.active]
+        if not source['playlist']: return False
+        segments = source['playlist'].segments
+        plan = self.timeline.plan(self.active, source['playlist'])
+        prefetched = {}
+        if self.timeline.needs_alignment(self.active, plan):
+            plan, prefetched = self.align(source, segments, plan)
+        for segment, discontinuity in plan[:3]:
+            timeout = max(4, min(15, segment.duration * 1.5))
+            data = prefetched.pop(segment.url, None)
+            for owner, url in ([] if data else [(source, segment.url), *self.alternates(segment)]):
+                try:
+                    data = _media(self.fetch(url, owner['headers'], timeout))
+                    break
+                except (OSError, ValueError, urllib.error.URLError):
+                    continue
+            if data is None:
+                source['failures'] += 1
+                if self.switch('segment failed'): return True
+                attempts = self.failed.get(segment.url, 0) + 1
+                self.failed = {segment.url: attempts}
+                if attempts >= 2:
+                    # Nowhere else to get it: drop one segment rather than freeze live playback.
+                    with self.lock: self.timeline.skip(self.active, segment)
+                    return True
+                return False
+            key = f'{self.timeline.next_seq}'
+            with self.lock:
+                self.timeline.commit(self.active, segment, discontinuity, key, merge.first_pts(data))
+                self.cache[key] = data; self.cache_bytes += len(data)
+                self.failed = {}
+                keep = self.timeline.keys()
+                for old in [k for k in self.cache if k not in keep]:
+                    self.cache_bytes -= len(self.cache.pop(old))
+                while self.cache_bytes > self.CACHE_BYTES and len(self.cache) > 1:
+                    self.cache_bytes -= len(self.cache.pop(next(iter(self.cache))))
+                self.lock.notify_all()
+        return bool(plan)
+
+    def playlist(self):
+        self.requested = time.monotonic(); self.start()
+        deadline = time.monotonic() + 20
+        with self.lock:
+            # Give the first request a short buffer instead of a single segment.
+            while len(self.timeline.entries) < min(3, self.timeline.start) and time.monotonic() < deadline:
+                if self.timeline.entries and time.monotonic() > deadline - 12: break
+                self.lock.wait(.25)
+            return self.timeline.render(lambda key: f'{self.relay.base}/m/{self.sid}/{key}.ts').encode()
+
+    def segment(self, key):
+        self.requested = time.monotonic()
+        with self.lock:
+            data = self.cache.get(key)
+        if data is None: raise ValueError('segment expired')
+        return data
+
+
 class Relay:
     def __init__(self):
-        self.sessions = {}; self.resources = {}; self.lock = threading.Lock()
+        self.sessions = {}; self.resources = {}; self.merged = {}; self.lock = threading.Lock()
         owner = self
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
             def log_message(self, *args): pass
             def do_GET(self):
                 try:
@@ -219,8 +480,28 @@ class Relay:
             session['cached_until'] = time.monotonic() + 1.5
             return playlist, 'application/vnd.apple.mpegurl'
 
+    def add_merged(self, sources, minimum=2):
+        """Serve live sources as one prefetched playlist; return (url, usable sources) or (None, usable)."""
+        sid = secrets.token_urlsafe(18)
+        session = Merged(self, sid, sources)
+        usable = session.prepare()
+        if usable < max(1, minimum): return None, usable
+        with self.lock: self.merged[sid] = session
+        session.start()
+        return self.base + '/m/' + sid + '.m3u8', usable
+
     def get(self, path):
         path = urllib.parse.urlsplit(path).path
+        if path.startswith('/m/'):
+            name = path[3:]
+            if name.endswith('.m3u8') and '/' not in name:
+                session = self.merged.get(name[:-5])
+                if not session: raise ValueError('unknown stream')
+                return session.playlist(), 'application/vnd.apple.mpegurl'
+            sid, _, key = name.partition('/')
+            session = self.merged.get(sid)
+            if session and key.endswith('.ts'): return session.segment(key[:-3]), 'video/mp2t'
+            raise ValueError('unknown segment')
         if path.startswith('/playlist/') and path.endswith('.m3u8'):
             sid = path[len('/playlist/'):-len('.m3u8')]
             session = self.sessions.get(sid)
@@ -234,4 +515,5 @@ class Relay:
         raise ValueError('unknown path')
 
     def close(self):
+        for session in list(self.merged.values()): session.stop()
         self.http.shutdown(); self.http.server_close()

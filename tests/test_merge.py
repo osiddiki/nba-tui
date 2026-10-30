@@ -1,0 +1,159 @@
+import concurrent.futures
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from sportscli import app as nba, merge, relay
+
+
+def playlist(prefix, first, last, *, pdt=None, target=2):
+    lines = ['#EXTM3U', f'#EXT-X-TARGETDURATION:{target}', f'#EXT-X-MEDIA-SEQUENCE:{first}']
+    for n in range(first, last + 1):
+        if pdt is not None: lines.append(f'#EXT-X-PROGRAM-DATE-TIME:2026-10-29T20:00:{pdt + 2 * n:02d}Z')
+        lines += [f'#EXTINF:{target}.0,', f'{prefix}{n:03d}.ts']
+    return merge.parse_media('\n'.join(lines) + '\n', 'https://example.com/live/index.m3u8')
+
+
+def ts_with_pts(pts):
+    p = bytes([0x21 | ((pts >> 29) & 0x0e), (pts >> 22) & 0xff, 0x01 | ((pts >> 14) & 0xfe),
+               (pts >> 7) & 0xff, 0x01 | ((pts << 1) & 0xfe)])
+    pes = b'\x00\x00\x01\xe0\x00\x00\x80\x80\x05' + p
+    return b'\x47\x41\x00\x10' + pes + b'\xff' * (184 - len(pes))
+
+
+class MergeTest(unittest.TestCase):
+    def test_parses_media_playlists_and_rejects_features_it_cannot_splice(self):
+        parsed = playlist('a_', 10, 12)
+        self.assertEqual([s.seq for s in parsed.segments], [10, 11, 12])
+        self.assertEqual(parsed.segments[0].url, 'https://example.com/live/a_010.ts')
+        for tag in ('#EXT-X-MAP:URI="init.mp4"', '#EXT-X-KEY:METHOD=AES-128,URI="k"'):
+            with self.assertRaises(merge.Unsupported):
+                merge.parse_media(f'#EXTM3U\n{tag}\n#EXTINF:2,\na.ts\n', 'https://example.com/')
+        self.assertEqual(len(merge.parse_media('#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\na.ts\n',
+                                               'https://example.com/').segments), 1)
+
+    def test_master_playlist_picks_highest_bandwidth_and_rejects_separate_audio(self):
+        master = ('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow.m3u8\n'
+                  '#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS="avc1.64001f,mp4a.40.2"\nhigh.m3u8\n')
+        self.assertEqual(merge.variant_url(master, 'https://example.com/x/master.m3u8'),
+                         'https://example.com/x/high.m3u8')
+        self.assertIsNone(merge.variant_url('#EXTM3U\n#EXTINF:2,\na.ts\n', 'https://example.com/'))
+        with self.assertRaises(merge.Unsupported):
+            merge.variant_url('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="audio.m3u8"\n' + master[8:],
+                              'https://example.com/')
+
+    def test_timeline_starts_near_live_edge_and_continues_by_sequence(self):
+        timeline = merge.Timeline()
+        plan = timeline.plan(0, playlist('a_', 0, 9))
+        self.assertEqual([s.seq for s, _ in plan], [7, 8, 9])
+        for segment, discontinuity in plan: timeline.commit(0, segment, discontinuity, str(segment.seq))
+        self.assertEqual([s.seq for s, _ in timeline.plan(0, playlist('a_', 5, 11))], [10, 11])
+
+    def test_switch_continues_after_a_matching_segment_name_without_discontinuity(self):
+        timeline = merge.Timeline()
+        for segment, flag in timeline.plan(0, playlist('a_', 0, 5)): timeline.commit(0, segment, flag, segment.name)
+        rehosted = merge.parse_media('#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:900\n' +
+                                     ''.join(f'#EXTINF:2,\nhttps://cdn2.example/a_{n:03d}.ts\n' for n in range(3, 8)),
+                                     'https://cdn2.example/')
+        plan = timeline.plan(1, rehosted)
+        self.assertEqual([(s.name, flag) for s, flag in plan], [('a_006.ts', False), ('a_007.ts', False)])
+
+    def test_switch_uses_program_date_time_when_both_sources_have_it(self):
+        timeline = merge.Timeline()
+        for segment, flag in timeline.plan(0, playlist('a_', 0, 5, pdt=0)): timeline.commit(0, segment, flag, segment.name)
+        plan = timeline.plan(1, playlist('seg-', 0, 8, pdt=0))
+        self.assertEqual(plan[0][0].name, 'seg-006.ts')
+        self.assertTrue(plan[0][1])
+
+    def test_render_marks_discontinuities_and_tracks_the_sequence(self):
+        timeline = merge.Timeline(window=3, keep=4)
+        for n in range(6):
+            timeline.commit(0, merge.Segment(n, f'https://e/{n}.ts', 2.0), n == 3, f'k{n}')
+        text = timeline.render(lambda key: f'http://127.0.0.1/m/s/{key}.ts')
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:3', text)
+        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:0\n#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\nhttp://127.0.0.1/m/s/k3.ts', text)
+        timeline.commit(0, merge.Segment(6, 'https://e/6.ts', 2.0), False, 'k6')
+        self.assertIn('#EXT-X-DISCONTINUITY-SEQUENCE:1', timeline.render(lambda key: key))
+
+    def test_timestamps_realign_and_wait_for_unpublished_media(self):
+        self.assertEqual(merge.first_pts(ts_with_pts(123456)), 123456)
+        self.assertAlmostEqual(merge.pts_seconds(5, (1 << 33) - 90000 + 5), 1.0)
+        segments = playlist('seg-', 0, 9).segments
+        # Segment 5 starts at 10 s; the player has already played up to 14 s.
+        self.assertEqual(merge.realign(segments, 5, 10 * 90000, 14 * 90000), 7)
+        self.assertEqual(merge.realign(segments, 5, 10 * 90000, 30 * 90000), len(segments))
+
+    def test_relay_merged_session_fails_over_to_backup(self):
+        server = relay.Relay()
+        state = {'dead': False, 'newest': 6}
+        def fetch(url, *args, **kwargs):
+            if 'primary' in url:
+                if state['dead']: raise relay.urllib.error.URLError('down')
+                if url.endswith('.m3u8'): return ('\n'.join(['#EXTM3U', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:0'] +
+                                           [f'#EXTINF:2,\na_{n:03d}.ts' for n in range(state['newest'] + 1)]) + '\n').encode()
+                return ts_with_pts(int(url[-6:-3]) * 180000)
+            if url.endswith('.m3u8'): return ('\n'.join(['#EXTM3U', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:0'] +
+                                       [f'#EXTINF:2,\nseg-{n:03d}.ts' for n in range(12)]) + '\n').encode()
+            return ts_with_pts(int(url[-6:-3]) * 180000)
+        try:
+            with patch.object(relay, '_download', side_effect=fetch), patch.object(relay.Merged, 'start'):
+                url, usable = server.add_merged([('https://primary.example/live.m3u8', {}),
+                                                 ('https://backup.example/live.m3u8', {})])
+                session = next(iter(server.merged.values()))
+                self.assertEqual(usable, 2)
+                session.pump()
+                self.assertEqual([e[1] for e in session.timeline.entries], ['0', '1', '2'])
+                state['dead'] = True
+                for source in range(2):
+                    try: session.load(source)
+                    except relay.urllib.error.URLError: session.sources[source]['failures'] += 1
+                session.sources[0]['failures'] = 2
+                self.assertTrue(session.switch('test'))
+                committed = []
+                original = session.timeline.commit
+                session.timeline.commit = lambda i, seg, *a: (committed.append(seg.name), original(i, seg, *a))
+                session.pump()
+                # The primary played through 14 s; timestamps resume exactly there, not at the backup's edge.
+                self.assertEqual(committed, ['seg-007.ts', 'seg-008.ts', 'seg-009.ts'])
+                manifest, kind = server.get('/' + url.split('/', 3)[-1])
+            self.assertIn(b'#EXT-X-DISCONTINUITY', manifest)
+            self.assertEqual(kind, 'application/vnd.apple.mpegurl')
+        finally:
+            server.close()
+
+
+class BackupSelectionTest(unittest.TestCase):
+    def make_app(self):
+        app = nba.App.__new__(nba.App)
+        app.dual_stream, app.feed_context = True, 'live'
+        app.hidden_feeds, app.manual_status, app.auto_checks, app.stream_notes = set(), {}, {}, {}
+        return app
+
+    def test_backups_keep_the_broadcast_side_and_prefer_reachable_sources(self):
+        app = self.make_app()
+        feed = lambda source, side, kind='direct': SimpleNamespace(source=source, side=side, kind=kind, url='u-' + source)
+        chosen = feed('A', 'home')
+        away, unknown, ok_home, web = feed('B', 'away'), feed('C', 'unknown'), feed('D', 'home'), feed('E', 'home', 'web')
+        app.feeds = [chosen, away, unknown, ok_home, web]
+        app.auto_checks = {id(ok_home): 'OK'}
+        self.assertEqual(app.backup_candidates(chosen), [ok_home, unknown])
+        app.dual_stream = False
+        self.assertEqual(app.backup_candidates(chosen), [])
+        app.dual_stream, app.feed_context = True, 'replay'
+        self.assertEqual(app.backup_candidates(chosen), [])
+
+    def test_merge_backup_falls_back_to_the_selected_source(self):
+        app = self.make_app()
+        failed = concurrent.futures.Future(); failed.set_exception(OSError('no backup'))
+        self.assertEqual(app.merge_backup('https://a/live.m3u8', {'Referer': 'x'}, [(failed, SimpleNamespace(source='B'))]),
+                         ('https://a/live.m3u8', {'Referer': 'x'}))
+        ready = concurrent.futures.Future(); ready.set_result(('https://b/live.m3u8', {}))
+        local = SimpleNamespace(add_merged=lambda sources: ('http://127.0.0.1:1/m/x.m3u8', len(sources)))
+        app.get_relay = lambda: local
+        self.assertEqual(app.merge_backup('https://a/live.m3u8', {}, [(ready, SimpleNamespace(source='B'))]),
+                         ('http://127.0.0.1:1/m/x.m3u8', {}))
+        self.assertEqual(app.stream_notes['http://127.0.0.1:1/m/x.m3u8'], ' Backup: B.')
+
+
+if __name__ == '__main__':
+    unittest.main()

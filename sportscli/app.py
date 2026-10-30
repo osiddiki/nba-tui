@@ -61,6 +61,7 @@ HELP_LINES = [
     'SOURCES        f: broadcast side    o: provider    /: search choices',
     'CHECKS         t: test selected source    g: rank by your checks',
     'PLAYBACK       p: player    c: cache    v: terminal video (mpv)',
+    'BACKUP         b: merge a second live source to cover drops',
     'AD MUTE        --ad-mute: marked replays in mpv only',
     'AI ADS         --ai-ad-mute: optional local NBA detector in mpv',
     'AI PREVIEW     --ai-ad-observe: show predictions without muting',
@@ -635,8 +636,15 @@ def ntv_feeds(game):
     return [f for f in out if not (f.url in seen or seen.add(f.url))]
 
 
+# Retry a failed HLS segment instead of skipping it, and refill a little more
+# after an underrun so one slow segment does not cause repeated stutters.
+HLS_OPTIONS = 'allowed_extensions=ALL,allowed_segment_extensions=ALL,extension_picky=0,seg_max_retry=3'
+STALL_OPTIONS = ('cache-pause-wait=2', 'network-timeout=20')
+
+
 def mpv_command(url, headers=None, *, cache=15, terminal_video=False):
-    cmd = ['mpv', '--no-ytdl', '--force-window=yes', '--title=Sports CLI', '--demuxer-lavf-o=allowed_extensions=ALL,allowed_segment_extensions=ALL,extension_picky=0', '--cache=yes', f'--cache-secs={cache}', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=' + str(cache)]
+    cmd = ['mpv', '--no-ytdl', '--force-window=yes', '--title=Sports CLI', '--demuxer-lavf-o=' + HLS_OPTIONS, '--cache=yes', f'--cache-secs={cache}', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=' + str(cache)]
+    cmd.extend('--' + option for option in STALL_OPTIONS)
     if terminal_video:
         cmd.append('--vo=tct')
     for name, value in (headers or {}).items():
@@ -659,7 +667,7 @@ def find_iina():
 def iina_command(executable, url, headers=None, *, cache=15):
     cmd = [executable, '--no-stdin', '--mpv-ytdl=no', '--mpv-force-media-title=Sports CLI',
            '--mpv-cache=yes', f'--mpv-cache-secs={cache}', '--mpv-demuxer-max-bytes=256MiB',
-           '--mpv-demuxer-lavf-o=allowed_extensions=ALL,allowed_segment_extensions=ALL,extension_picky=0']
+           '--mpv-demuxer-lavf-o=' + HLS_OPTIONS, *('--mpv-' + option for option in STALL_OPTIONS)]
     fields = []
     for name, value in (headers or {}).items():
         if isinstance(name, str) and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9-]+', name) and not any(c in value for c in '\r\n,'):
@@ -679,7 +687,7 @@ def celluloid_command(executable, url, headers=None, *, cache=15):
     cmd = [executable, '--no-existing-session', '--mpv-ytdl=no',
            '--mpv-force-media-title=Sports CLI', '--mpv-cache=yes',
            f'--mpv-cache-secs={cache}', '--mpv-demuxer-max-bytes=256MiB',
-           '--mpv-demuxer-lavf-o=allowed_extensions=ALL,allowed_segment_extensions=ALL,extension_picky=0']
+           '--mpv-demuxer-lavf-o=' + HLS_OPTIONS, *('--mpv-' + option for option in STALL_OPTIONS)]
     fields = []
     for name, value in (headers or {}).items():
         # Celluloid internally wraps option values in single quotes and parses
@@ -835,6 +843,8 @@ class App:
         self.resolver_owned = False
         self.cache = int(config.get('cache', 15)) if str(config.get('cache', 15)) in ('5','15','30') else 15
         self.terminal_video = bool(config.get('terminal_video', False))
+        self.dual_stream = config.get('dual_stream', True) is not False
+        self.stream_notes = {}
         self.ad_mute = ad_mute_enabled
         self.ai_ad_mute = ai_ad_mute_enabled
         self.ai_ad_observe = ai_ad_observe_enabled
@@ -1044,6 +1054,7 @@ class App:
             if self.cache != 15: context.append(f'cache: {self.cache}s')
             if ad_mode != 'off': context.append(f'ad mute: {ad_mode}')
             if self.rank_by_checks: context.append('ranked')
+            if not self.dual_stream and self.feed_context == 'live': context.append('backup: off')
             self.put(4, 1, '  ·  '.join(context), curses.A_DIM)
             self.fi = min(self.fi, max(0, len(fs)-1))
             compact = w < 65
@@ -1879,9 +1890,11 @@ class App:
             else:
                 ad_note = ' Ad mute is available only for marked replays.'
         ai_requested = self.ai_ad_mute or self.ai_ad_observe
-        ai_active = ai_requested and self.league == 'nba'
+        leagues = ai_ad_mute.supported_leagues() if ai_requested else set()
+        ai_active = ai_requested and self.league in leagues
         if ai_requested and not ai_active:
-            ad_note = ' AI ad mute is currently limited to NBA broadcasts.'
+            ad_note = (' AI ad mute is currently limited to NBA broadcasts.' if leagues == {'nba'}
+                       else ' The installed ad model was not trained on this league.')
         temporary, monitor = None, None
         command = mpv_command(url, headers, cache=self.cache, terminal_video=self.terminal_video)
         if intervals or ai_active:
@@ -1894,6 +1907,7 @@ class App:
             except OSError:
                 if temporary: temporary.cleanup(); temporary = None
                 ad_note = ' Ad mute could not start.'
+        ad_note = self.stream_notes.pop(url, '') + ad_note
         self.message = 'Starting mpv. Press q in mpv to return.' + ad_note; self.render()
         curses.def_prog_mode(); curses.endwin()
         try:
@@ -1926,14 +1940,50 @@ class App:
         self.action_current = (serial, generation, feed, action)
         self.action_inflight.add(serial)
         self.message = f'{"Opening" if action == "play" else "Inspecting"} {feed.source}; Esc cancels.'
+        backups = self.backup_candidates(feed) if action == 'play' else []
         def worker():
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(backups)) if backups else None
+            # Resolve backups alongside the selected source; never let them delay it for long.
+            pending = [(pool.submit(self.resolve_feed, backup), backup) for backup in backups] if pool else []
             try:
                 url, headers = self.resolve_feed(feed)
+                if pending: url, headers = self.merge_backup(url, headers, pending)
                 result, error = (url, headers), None
             except Exception as exc:
                 result, error = None, exc
+            finally:
+                if pool: pool.shutdown(wait=False, cancel_futures=True)
             if not self.closed.is_set(): self.action_queue.put((serial, generation, feed, action, result, error))
         threading.Thread(target=worker, daemon=True).start()
+
+    def backup_candidates(self, feed):
+        """Other live sources for the same broadcast side, reachable ones first."""
+        if not self.dual_stream or self.feed_context != 'live' or feed.kind in ('web', 'ppv'): return []
+        def status(item): return self.manual_status.get(id(item), self.auto_checks.get(id(item)))
+        # A home and an away feed have different commentary, so never splice between them.
+        options = [item for item in self.feeds if item is not feed and id(item) not in self.hidden_feeds
+                   and item.kind not in ('web', 'ppv') and item.url != feed.url
+                   and (feed.side == 'unknown' or item.side in (feed.side, 'unknown'))]
+        options.sort(key=lambda item: (status(item) != 'OK', item.side != feed.side,
+                                       isinstance(status(item), str) and status(item).startswith('HTTP ')))
+        return options[:2]
+
+    def merge_backup(self, url, headers, pending, budget=10):
+        """Serve the selected source with the first backup that resolves in time."""
+        sources, label = [(url, headers)], None
+        try:
+            futures = {future: backup for future, backup in pending}
+            for future in concurrent.futures.as_completed(futures, timeout=budget):
+                try: sources.append(future.result()); label = futures[future].source; break
+                except Exception: continue
+        except concurrent.futures.TimeoutError:
+            pass
+        if len(sources) == 1: return url, headers
+        try: merged, usable = self.get_relay().add_merged(sources)
+        except (OSError, ValueError, DependencyError): return url, headers
+        if not merged or usable < 2: return url, headers
+        self.stream_notes[merged] = f' Backup: {label}.'
+        return merged, {}
 
     def show_stream_url(self, url, headers):
         curses.def_prog_mode(); curses.endwin()
@@ -2255,6 +2305,10 @@ class App:
                 elif self.mode == 'feeds' and key == ord('i') and self.visible_feeds():
                     feed = self.visible_feeds()[self.fi]
                     self.feed_selection_touched = True; self.begin_feed_action(feed, 'inspect')
+                elif self.mode == 'feeds' and key == ord('b'):
+                    self.dual_stream = not self.dual_stream; self.config['dual_stream'] = self.dual_stream; save_config(self.config)
+                    self.message = ('Live playback adds a backup source when one resolves.' if self.dual_stream
+                                    else 'Backup source off; live streams play directly.')
                 elif self.mode == 'feeds' and key == ord('c'):
                     self.cache = {5:15,15:30,30:5}[self.cache]; self.config['cache']=self.cache; save_config(self.config)
                 elif self.mode == 'feeds' and key == ord('v'):

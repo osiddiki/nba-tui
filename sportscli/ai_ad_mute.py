@@ -36,7 +36,20 @@ def installation_dir():
 
 def installation_paths():
     root = installation_dir()
-    return root / 'venv' / 'bin' / 'python', root / 'nba-ads-v1.tflite'
+    # A locally trained model installed by tools.train_ad_model replaces the original.
+    trained = root / 'ad-model.tflite'
+    return root / 'venv' / 'bin' / 'python', trained if trained.is_file() else root / 'nba-ads-v1.tflite'
+
+
+def supported_leagues():
+    """Leagues the active model was trained on; the original model covers only the NBA."""
+    try:
+        document = json.loads((installation_dir() / 'ad-model.json').read_text(encoding='utf-8'))
+        leagues = document.get('leagues') if (installation_dir() / 'ad-model.tflite').is_file() else None
+    except (OSError, ValueError, AttributeError):
+        leagues = None
+    if not isinstance(leagues, list) or not all(isinstance(item, str) for item in leagues): return {'nba'}
+    return set(leagues) or {'nba'}
 
 
 def installed():

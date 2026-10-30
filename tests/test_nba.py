@@ -473,12 +473,12 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_relay_retries_temporary_errors_but_not_rejected_tokens(self):
         error = urllib.error.HTTPError('https://example.com', 502, 'unavailable', {}, None)
-        with patch.object(relay.urllib.request, 'urlopen', side_effect=[error, io.BytesIO(b'OK')]) as fetch, \
+        with patch.object(relay, '_request', side_effect=[error, b'OK']) as fetch, \
              patch.object(relay.time, 'sleep'):
             self.assertEqual(relay._download('https://example.com/a','https://example.com/'), b'OK')
         self.assertEqual(fetch.call_count, 2)
         denied = urllib.error.HTTPError('https://example.com', 403, 'forbidden', {}, None)
-        with patch.object(relay.urllib.request, 'urlopen', side_effect=denied) as fetch:
+        with patch.object(relay, '_request', side_effect=denied) as fetch:
             with self.assertRaises(urllib.error.HTTPError):
                 relay._download('https://example.com/a','https://example.com/')
         self.assertEqual(fetch.call_count, 1)

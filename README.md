@@ -68,6 +68,7 @@ When using mpv, close its window or press `q` in mpv to return to the picker. II
 | `f`, `o`, `r` | Broadcast side, provider, or refresh |
 | `t`, `g`, `i` | Test a source, rank sources by checks, or inspect its media URL |
 | `p`, `c`, `v` | Player, cache size, or mpv terminal video |
+| `b` | Turn the live backup source on or off |
 | `u`, `a`, `d` | Paste a media URL, configure an add-on, or select a PPV resolver directory |
 | `?`, `q` | Help or quit |
 
@@ -90,6 +91,12 @@ A dash for broadcast side or quality means the directory did not provide it. A `
 While choices load, the app checks up to two supported sources per directory in the background. `OK` means it reached a playlist and one media segment; `Checking`, `Unverified`, or a status such as `HTTP 403` describes other outcomes. A single failed check may be temporary, so the option remains available. PPV sources are resolved when selected instead. Results appear without waiting for these checks.
 
 If resolution, a test, or mpv playback fails, the source is hidden for the current list. Press `r` to fetch the list again. A missing local dependency is reported without hiding the source. Some players use short-lived tokens or wrapped video segments; the session-only relay on `127.0.0.1` refreshes tokens and supplies normal HLS to the player. Its URLs stop working when the app exits.
+
+### Backup sources
+
+When you play a live game, the app also resolves up to two other sources for the same broadcast side and serves the first one that works, together with your choice, through the local relay on `127.0.0.1`. The relay downloads each segment before handing it to the player. If your source freezes, stops listing new segments, or fails a segment, playback continues from the backup without the player seeing an error. When both sources re-host the same upstream stream, the relay resumes at the same segment or timestamp, so the switch is seamless. Independently encoded sources can show a short picture change, and if their clocks are unrelated mpv's time display jumps at the switch.
+
+The backup is used only for live HLS sources that are not encrypted or split into separate audio playlists; PPV and browser-only sources are not used as backups. Home and away feeds are never mixed, because their commentary differs. If no backup resolves within about 10 seconds, the stream plays directly as before. Press `b` in a stream list to turn this off; the setting is saved. A backup doubles playlist requests but not video downloads, which come from one source at a time.
 
 ### Replays
 
@@ -119,7 +126,7 @@ The install downloads the original 150 MB model and conversion packages, verifie
 
 This detector samples video frames locally in mpv and sends nothing to an AI service. It was trained for NBA video and is disabled for other leagues. Try `--ai-ad-observe` first: it shows predictions without muting. In tests with real NBA broadcasts and commercials, the detector also classified some studio and bench coverage as ads. Automatic muting is experimental and may silence game coverage; use mpv's `m` key to override it. The model is a quantized version of the MIT-licensed [NBA-redzone-ML model](https://huggingface.co/plt3/NBA-redzone-ML), and the project describes its original training and evaluation [here](https://github.com/plt3/NBA-redzone-ML).
 
-For developers comparing detectors against labeled local recordings, see [ad detector testing](docs/ad-detector-testing.md).
+For developers comparing detectors against labeled local recordings, or training a small multi-sport model, see [ad detector testing](docs/ad-detector-testing.md). An installed trained model enables AI detection for the leagues it was trained on.
 
 ### Add-ons and resolver
 

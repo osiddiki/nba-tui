@@ -14,17 +14,25 @@ def main():
             Interpreter = tf.lite.Interpreter
         interpreter = Interpreter(model_path=sys.argv[1], num_threads=2)
         interpreter.allocate_tensors()
-        input_id = interpreter.get_input_details()[0]['index']
-        output_id = interpreter.get_output_details()[0]['index']
+        source, target = interpreter.get_input_details()[0], interpreter.get_output_details()[0]
+        # Models declare their own frame size; quantized models take integer pixels.
+        height, width = int(source['shape'][1]), int(source['shape'][2])
+        in_scale, in_zero = source.get('quantization', (0.0, 0))
+        out_scale, out_zero = target.get('quantization', (0.0, 0))
         print(json.dumps({'ready': True}), flush=True)
         for line in sys.stdin:
             try:
                 path = json.loads(line)['image']
                 with Image.open(path) as image:
-                    pixels = np.asarray(image.convert('RGB').resize((320, 200)), dtype='float32')[None]
-                interpreter.set_tensor(input_id, pixels)
+                    pixels = np.asarray(image.convert('RGB').resize((width, height)), dtype='float32')[None]
+                if source['dtype'] != np.float32:
+                    info = np.iinfo(source['dtype'])
+                    pixels = np.clip(np.round(pixels / in_scale + in_zero), info.min, info.max) if in_scale else pixels
+                    pixels = pixels.astype(source['dtype'])
+                interpreter.set_tensor(source['index'], pixels)
                 interpreter.invoke()
-                score = float(interpreter.get_tensor(output_id)[0][0])
+                raw = interpreter.get_tensor(target['index']).reshape(-1)[0]
+                score = float((float(raw) - out_zero) * out_scale) if target['dtype'] != np.float32 and out_scale else float(raw)
                 print(json.dumps({'score':score}), flush=True)
             except (OSError, ValueError, KeyError, TypeError):
                 print(json.dumps({'error':'frame could not be classified'}), flush=True)
