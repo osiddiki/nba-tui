@@ -72,7 +72,7 @@ class FakePlayer:
 
 class AiAdMuteTests(unittest.TestCase):
     @contextmanager
-    def detector(self, muted=False):
+    def detector(self, muted=False, on_break=None):
         with tempfile.TemporaryDirectory(prefix='ai-ipc-test-', dir='/tmp') as root:
             worker = pathlib.Path(root) / 'worker.py'
             worker.write_text('import json,sys,time\nprint(json.dumps({"ready":True}),flush=True)\n'
@@ -82,7 +82,7 @@ class AiAdMuteTests(unittest.TestCase):
                               ' print(json.dumps({"score":frame["score"]}),flush=True)\n')
             path = str(pathlib.Path(root) / 'player.sock')
             player = FakePlayer(path, muted=muted)
-            monitor = ai_ad_mute.Monitor(path, root, python=sys.executable, model='unused', interval=.03)
+            monitor = ai_ad_mute.Monitor(path, root, python=sys.executable, model='unused', interval=.03, on_break=on_break)
             try:
                 with patch.object(ai_ad_mute, 'WORKER', worker):
                     monitor.start()
@@ -144,6 +144,27 @@ class AiAdMuteTests(unittest.TestCase):
             player.hook = hook
             self.assertTrue(player.wait_for(lambda: not player.muted))
             self.assertEqual(len(coverage_frames), 1)
+
+    def test_break_callback_follows_detected_breaks(self):
+        events = []
+        def on_break(active, command):
+            events.append(active)
+            self.assertEqual(command('get_property', 'mute')['error'], 'success')
+        with self.detector(on_break=on_break) as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: events == [True]))
+            player.score = .95
+            self.assertTrue(player.wait_for(lambda: events == [True, False]))
+            player.score = .01
+            self.assertTrue(player.wait_for(lambda: events == [True, False, True]))
+            monitor.stop()
+        self.assertEqual(events, [True, False, True, False])
+
+    def test_break_callback_ends_when_user_unmutes(self):
+        events = []
+        with self.detector(on_break=lambda active, command: events.append(active)) as (player, monitor):
+            self.assertTrue(player.wait_for(lambda: player.muted))
+            player.muted = False
+            self.assertTrue(player.wait_for(lambda: events == [True, False]))
 
     def test_pause_or_stall_releases_mute(self):
         for pause in (False, True):

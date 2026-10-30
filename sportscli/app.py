@@ -21,7 +21,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from . import providers, relay, grading, replays, smart_search, players, ad_mute, ai_ad_mute
+from . import providers, relay, grading, replays, smart_search, players, ad_mute, ai_ad_mute, breaks
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
@@ -65,6 +65,7 @@ HELP_LINES = [
     'AD MUTE        --ad-mute: marked replays in mpv only',
     'AI ADS         --ai-ad-mute: optional local NBA detector in mpv',
     'AI PREVIEW     --ai-ad-observe: show predictions without muting',
+    'AD BREAKS      m: with --ai-ad-mute, mute, show a break screen, or show another live game in a corner',
     'MORE           i: show media URL    u: play a pasted media URL',
     'SETUP          a: sports add-on    d: local PPV resolver',
     'REFRESH        r: reload current list    q: quit',
@@ -844,6 +845,7 @@ class App:
         self.cache = int(config.get('cache', 15)) if str(config.get('cache', 15)) in ('5','15','30') else 15
         self.terminal_video = bool(config.get('terminal_video', False))
         self.dual_stream = config.get('dual_stream', True) is not False
+        self.ad_breaks = config.get('ad_breaks') if config.get('ad_breaks') in breaks.MODES else 'mute'
         self.stream_notes = {}
         self.record_dir = None
         self.ad_mute = ad_mute_enabled
@@ -1054,6 +1056,7 @@ class App:
             if self.feed_search: context.append(f'search: {self.feed_search}')
             if self.cache != 15: context.append(f'cache: {self.cache}s')
             if ad_mode != 'off': context.append(f'ad mute: {ad_mode}')
+            if self.ai_ad_mute and self.ad_breaks != 'mute': context.append('breaks: ' + breaks.LABELS[self.ad_breaks])
             if self.rank_by_checks: context.append('ranked')
             if not self.dual_stream and self.feed_context == 'live': context.append('backup: off')
             self.put(4, 1, '  ·  '.join(context), curses.A_DIM)
@@ -1896,7 +1899,7 @@ class App:
         if ai_requested and not ai_active:
             ad_note = (' AI ad mute is currently limited to NBA broadcasts.' if leagues == {'nba'}
                        else ' The installed ad model was not trained on this league.')
-        temporary, monitor = None, None
+        temporary, monitor, preview = None, None, None
         command = mpv_command(url, headers, cache=self.cache, terminal_video=self.terminal_video)
         if self.record_dir:
             # mpv writes the stream it receives, so nothing is downloaded twice.
@@ -1907,10 +1910,13 @@ class App:
             try:
                 temporary = tempfile.TemporaryDirectory(prefix='sports-mpv-', dir='/tmp')
                 socket_path = os.path.join(temporary.name, 'mpv.sock')
-                monitor = ai_ad_mute.Monitor(socket_path, temporary.name, mute=self.ai_ad_mute) if ai_active else ad_mute.Monitor(socket_path, intervals)
+                on_break, preview = self.break_handler() if ai_active and self.ai_ad_mute else (None, None)
+                monitor = (ai_ad_mute.Monitor(socket_path, temporary.name, mute=self.ai_ad_mute, on_break=on_break)
+                           if ai_active else ad_mute.Monitor(socket_path, intervals))
                 monitor.start()
                 command.insert(1, '--input-ipc-server=' + socket_path)
             except OSError:
+                if preview: preview.close(); preview = None
                 if temporary: temporary.cleanup(); temporary = None
                 ad_note = ' Ad mute could not start.'
         ad_note = self.stream_notes.pop(url, '') + ad_note
@@ -1927,8 +1933,39 @@ class App:
             self.message = f'Could not start mpv: {e}'
         finally:
             if monitor: monitor.stop()
+            if preview: preview.close()
             if temporary: temporary.cleanup()
             curses.reset_prog_mode(); self.scr.refresh()
+
+    def break_handler(self):
+        """Return (on_break, preview) for the chosen ad-break mode; preview may be None."""
+        if self.ad_breaks == 'mute': return None, None
+        live = self.feed_context == 'live' and self.games and self.gi < len(self.games)
+        title = self.games[self.gi].title if live else 'Back when the game returns'
+        other = (breaks.other_live_game(self.games, self.games[self.gi].id)
+                 if live and self.ad_breaks == 'corner' and not self.terminal_video else None)
+        corner = self.ad_breaks == 'corner' and not self.terminal_video
+        preview = None
+        if other:
+            def resolve():
+                feeds, _ = fetch_feeds(other, dict(self.config))
+                for feed in [item for item in feeds if item.kind not in ('web', 'ppv')][:4]:
+                    try: return self.resolve_feed(feed)
+                    except Exception: continue
+                return None
+            preview = breaks.CornerPreview(other.title, resolve,
+                                           lambda url, headers: breaks.corner_command(mpv_command(url, headers, cache=self.cache)))
+            preview.prepare()
+        detail = (f'{other.title} is in the corner' if other else
+                  'No other live game to preview' if corner else '')
+        def on_break(active, command):
+            if active:
+                breaks.show_cover(command, title, detail)
+                if preview: preview.show()
+            else:
+                if preview: preview.hide()
+                breaks.hide_cover(command)
+        return on_break, preview
 
     def begin_feed_action(self, feed, action):
         """Resolve in the background; player and terminal operations stay on the UI thread."""
@@ -2315,6 +2352,11 @@ class App:
                     self.dual_stream = not self.dual_stream; self.config['dual_stream'] = self.dual_stream; save_config(self.config)
                     self.message = ('Live playback adds a backup source when one resolves.' if self.dual_stream
                                     else 'Backup source off; live streams play directly.')
+                elif self.mode == 'feeds' and key == ord('m'):
+                    self.ad_breaks = breaks.MODES[(breaks.MODES.index(self.ad_breaks)+1) % len(breaks.MODES)]
+                    self.config['ad_breaks'] = self.ad_breaks; save_config(self.config)
+                    self.message = 'During detected ads: ' + breaks.LABELS[self.ad_breaks] + '.'
+                    if not self.ai_ad_mute: self.message += ' Applies when run with --ai-ad-mute.'
                 elif self.mode == 'feeds' and key == ord('c'):
                     self.cache = {5:15,15:30,30:5}[self.cache]; self.config['cache']=self.cache; save_config(self.config)
                 elif self.mode == 'feeds' and key == ord('v'):

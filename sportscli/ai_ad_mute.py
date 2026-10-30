@@ -188,12 +188,14 @@ class PlaybackGate:
 
 
 class Monitor:
-    def __init__(self, socket_path, directory, python=None, model=None, interval=2, mute=True):
+    def __init__(self, socket_path, directory, python=None, model=None, interval=2, mute=True, on_break=None):
         default_python, default_model = installation_paths()
         self.path, self.directory = socket_path, pathlib.Path(directory)
         self.python, self.model = pathlib.Path(python or default_python), pathlib.Path(model or default_model)
         self.interval = interval
         self.mute = mute
+        # Called as on_break(active, command) when a muted break starts or ends.
+        self.on_break = on_break
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.process = None
@@ -220,7 +222,7 @@ class Monitor:
         raise OSError('AI detector did not respond')
 
     def run(self):
-        sock = None; reader = None; state = MuteState(); command = None
+        sock = None; reader = None; state = MuteState(); command = None; on_break = False
         image = self.directory / 'current-frame.jpg'
         try:
             env = os.environ.copy()
@@ -256,6 +258,12 @@ class Monitor:
             command('show-text', 'Local NBA ad detection active' if self.mute else 'Ad detection preview: audio unchanged', 2000)
             decision = Decision(); playback = PlaybackGate(); failures = 0; seen_epoch = playback_epoch
             manual_override = False
+            def sync_break():
+                nonlocal on_break
+                if not self.on_break or state.in_ad == on_break: return
+                on_break = state.in_ad
+                try: self.on_break(on_break, command)
+                except (OSError, ValueError, TypeError): pass
             def reset_detection():
                 nonlocal state, decision, manual_override
                 if state.applied:
@@ -266,6 +274,7 @@ class Monitor:
                     if muted['data'] and command('set_property', 'mute', False).get('error') != 'success':
                         raise OSError('Could not restore the player mute state')
                 state = MuteState(); decision = Decision()
+                sync_break()
             def unavailable_frame():
                 nonlocal failures
                 failures += 1
@@ -337,6 +346,7 @@ class Monitor:
                         reset_detection(); playback = PlaybackGate(); manual_override = False
                         seen_epoch = playback_epoch
                         continue
+                    sync_break()
                 if in_ad != was_ad:
                     label = ('Possible ad: auto-mute' if self.mute else 'Possible ad: audio unchanged') if in_ad else 'Broadcast detected'
                     command('show-text', label, 2000)
@@ -346,6 +356,9 @@ class Monitor:
                 try: command('show-text', 'Local ad detector stopped', 3000)
                 except (OSError, ValueError): pass
         finally:
+            if self.on_break and on_break:
+                try: self.on_break(False, command)
+                except (OSError, ValueError, TypeError): pass
             # Never strand a player muted if detection fails while it is still open.
             if command and state.applied:
                 try:
