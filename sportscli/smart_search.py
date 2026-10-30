@@ -339,6 +339,7 @@ class Hit:
     @property
     def key(self):
         if self.kind == 'team': return ('team', self.item.league, self.item.id)
+        if self.kind == 'player': return ('player', self.item.team.league, self.item.id)
         if self.kind == 'replay': return ('replay', self.item.url)
         return ('game', self.league, self.item.id)
 

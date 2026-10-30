@@ -21,7 +21,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from . import providers, relay, grading, replays, smart_search, ad_mute, ai_ad_mute
+from . import providers, relay, grading, replays, smart_search, players, ad_mute, ai_ad_mute
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
@@ -53,14 +53,14 @@ NTV = 'https://ntv.st'
 RESOLVER = 'http://127.0.0.1:38765'
 CONFIG = pathlib.Path(os.environ.get('XDG_CONFIG_HOME', pathlib.Path.home() / '.config')) / 'nba-tui' / 'config.json'
 HELP_LINES = [
-    'SEARCH         Type a team or matchup    arrows: select    Enter: open',
+    'SEARCH         Type a player, team or matchup    arrows: select    Enter: open',
     'GLOBAL         s on sports: search    Ctrl-F: search from anywhere',
     'NAVIGATE       Up/Down or j/k: move    Enter: select    Esc: back',
     'SCHEDULE       s: sport    [ / ]: date    /: team search    l: Lakers',
     'REPLAYS        R: replay archive    s: sport    /: search titles',
     'SOURCES        f: broadcast side    o: provider    /: search choices',
     'CHECKS         t: test selected source    g: rank by your checks',
-    'PLAYERS        p: player    c: cache    v: terminal video (mpv)',
+    'PLAYBACK       p: player    c: cache    v: terminal video (mpv)',
     'AD MUTE        --ad-mute: marked replays in mpv only',
     'AI ADS         --ai-ad-mute: optional local NBA detector in mpv',
     'AI PREVIEW     --ai-ad-observe: show predictions without muting',
@@ -747,6 +747,16 @@ class App:
         self.search_sources = {}
         self.search_due = None
         self.search_draw_signature = None
+        self.player_directory = None
+        self.player_key = None
+        self.player_due = None
+        self.player_cache = {}
+        self.player_partial_key = None
+        self.player_partial = []
+        self.player_inflight = set()
+        self.player_jobs = queue.Queue(maxsize=1)
+        self.player_queue = queue.Queue()
+        self.player_worker_started = False
         self.search_preview_key = None
         self.search_preview_generation = 0
         self.search_preview_sections = {}
@@ -774,6 +784,7 @@ class App:
         self.help_return = 'games'
         self.help_scroll = 0
         self.live_color = 0
+        self.accent_color = curses.A_BOLD
         self.loading_games = False
         self.schedule_generation = 0
         self.schedule_jobs = queue.Queue(maxsize=1)
@@ -870,14 +881,31 @@ class App:
         hits = self.search_results
         compact = width is not None and width < 65
         if not hits: return []
+        def player_text(hit):
+            if compact:
+                marker = '?' if not hit.item.verified else ''
+                team = hit.item.team.short or hit.item.team.nickname or hit.item.team.display
+                return f'{hit.title} · {hit.league.upper()}{marker} · {team}'
+            roster = '' if hit.item.verified else '  ·  roster unverified'
+            return f'{hit.title}  ·  {LEAGUES[hit.league][0]}  ·  {hit.item.team.display}{roster}'
+        player_heading = ('PLAYERS  ·  ? roster unverified' if compact and
+                          any(hit.kind == 'player' and not hit.item.verified for hit in hits) else 'PLAYERS')
         if hits[0].kind != 'team' or not self.search_plan.primary:
-            return [(i, f'{hit.kind.upper()}  {hit.title}  ·  {LEAGUES[hit.league][0]}', '')
-                    for i, hit in enumerate(hits)]
+            rows = []
+            for i, hit in enumerate(hits):
+                if hit.kind == 'player':
+                    if not any(row[2] == 'player-heading' for row in rows):
+                        rows.append((None, player_heading, 'player-heading'))
+                    rows.append((i, player_text(hit), ''))
+                else:
+                    rows.append((i, f'{hit.kind.upper()}  {hit.title}  ·  {LEAGUES[hit.league][0]}', ''))
+            return rows
         rows = [(0, f'{LEAGUES[hits[0].league][0]}  {hits[0].title}', 'team')]
         live = [(i, hit) for i, hit in enumerate(hits) if hit.kind in ('live', 'side')]
         upcoming = [(i, hit) for i, hit in enumerate(hits) if hit.kind == 'upcoming']
         archived = [(i, hit) for i, hit in enumerate(hits) if hit.kind == 'bundle']
         other = [(i, hit) for i, hit in enumerate(hits) if i and hit.kind == 'team']
+        matching_players = [(i, hit) for i, hit in enumerate(hits) if hit.kind == 'player']
         rows.append((None, '   LIVE', 'heading'))
         if not live: rows.append((None, '      —', 'empty'))
         for i, hit in live:
@@ -911,6 +939,10 @@ class App:
                 when = hit.item.start.astimezone().strftime('%b %d %I%p' if compact else '%a %b %d  %I:%M %p')
                 title = f'{hit.item.away_nickname} at {hit.item.home_nickname}' if compact else hit.title
                 rows.append((i, f'{"    " if compact else "      "}{when}  {title}', ''))
+        if matching_players:
+            rows.append((None, '   ' + player_heading, 'heading'))
+            for i, hit in matching_players:
+                rows.append((i, ('   ' if compact else '      ') + player_text(hit), ''))
         if other:
             rows.append((None, '   OTHER TEAMS', 'heading'))
             for i, hit in other:
@@ -920,7 +952,7 @@ class App:
     def render(self):
         self.scr.erase()
         h, w = self.scr.getmaxyx()
-        self.put(0, 1, 'SPORTS CLI', curses.A_BOLD)
+        self.put(0, 1, 'SPORTS CLI', self.accent_color)
         heading = {'search':'Find a game', 'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'replay_sources':'Replay sources', 'feeds':'Broadcasts', 'help':'Help'}
         self.put(1, 1, heading.get(self.mode, ''), curses.A_BOLD)
         if h < 12 or w < 36:
@@ -941,10 +973,11 @@ class App:
             for y, (index, text, style) in enumerate(lines[start:start+capacity], 3):
                 selected = index is not None and index == self.search_position
                 attr = (curses.A_REVERSE if selected else self.live_color if style == 'live' else
-                        curses.A_BOLD if style in ('team', 'heading') else curses.A_DIM if style == 'empty' else 0)
+                        curses.A_BOLD if style == 'team' else curses.A_DIM if style in ('heading', 'player-heading', 'empty') else 0)
                 self.put(y, 2, f'{">" if selected else " "} {text}', attr)
             if not self.search_results:
-                text = 'Try: lakers today  |  mavs vs rockets  |  tamu vs alabama' if not self.search_query else 'Looking for matches...' if self.search_inflight & self.search_needed else 'Keep typing a team or league.'
+                waiting = bool(self.search_inflight & self.search_needed or self.player_due or self.player_key in self.player_inflight)
+                text = 'Try: stephen curry  |  lakers today  |  mavs vs rockets' if not self.search_query else 'Looking for matches...' if waiting else 'Keep typing a player, team or league.'
                 self.put(4, 2, text)
             self.put(h-4, 1, 'Type to search   Up/Down select   Enter open' if w >= 55 else 'Type   ↑↓ select   Enter open')
             self.put(h-3, 1, 'Tab sports   Ctrl-U clear   ? help   Ctrl-X quit' if w >= 55 else 'Tab sports   ^U clear   ^X quit')
@@ -1002,17 +1035,23 @@ class App:
                 game = self.games[self.gi]
                 self.put(2, 1, f'{game.title}  |  {game.start.astimezone().strftime("%a %b %d %I:%M %p %Z")}')
                 self.put(3, 1, 'TV: ' + (', '.join(game.broadcasts) or 'not listed'))
-            rank = '  |  ranked' if self.rank_by_checks else ''
-            ad_mode = 'AI NBA' if self.ai_ad_mute else 'AI preview' if self.ai_ad_observe else 'marked replays' if self.ad_mute else 'off'
-            self.put(4, 1, f'{self.player.upper()}  |  side: {self.filter}  |  source: {self.provider_filter}  |  search: {self.feed_search or "all"}  |  cache: {self.cache}s  |  ad mute: {ad_mode}{rank}')
             fs = self.visible_feeds()
+            ad_mode = 'AI NBA' if self.ai_ad_mute else 'AI preview' if self.ai_ad_observe else 'marked replays' if self.ad_mute else 'off'
+            context = [self.player.upper()]
+            if self.filter != 'all': context.append(f'side: {self.filter}')
+            if self.provider_filter != 'all': context.append(f'source: {self.provider_filter}')
+            if self.feed_search: context.append(f'search: {self.feed_search}')
+            if self.cache != 15: context.append(f'cache: {self.cache}s')
+            if ad_mode != 'off': context.append(f'ad mute: {ad_mode}')
+            if self.rank_by_checks: context.append('ranked')
+            self.put(4, 1, '  ·  '.join(context), curses.A_DIM)
             self.fi = min(self.fi, max(0, len(fs)-1))
             compact = w < 65
             name_width = max(10, min(30, w-25)) if compact else max(14, min(50, w-40))
             columns = (f'{"SOURCE / SERVER":<{name_width}}  {"SIDE":5} CHECK' if compact else
                        f'{"SOURCE / SERVER":<{name_width}}  {"SIDE":5} {"QUALITY":7} CHECK')
             self.put(5, 4, columns, curses.A_DIM)
-            rows = max(1, (h-11)//2)
+            rows = max(1, (h-9)//2)
             start = max(0, self.fi-rows+1)
             for index, feed in enumerate(fs[start:start+rows]):
                 y = 6 + index*2
@@ -1028,7 +1067,7 @@ class App:
                 row = (f'{short_name:<{name_width}}  {view.side:5} {view.check}' if compact else
                        f'{short_name:<{name_width}}  {view.side:5} {view.quality:7} {view.check}')
                 self.put(y, 2, f'{">" if selected else " "} {row}', attr)
-                if y+1 < h-5:
+                if y+1 < h-4:
                     fallback = {'ppv':'Uses local resolver', 'web':'Browser-only; no media URL'}.get(feed.kind, 'Direct stream')
                     detail = view.detail or fallback
                     if feed.kind == 'web' and view.detail: detail = fallback + ' | ' + view.detail
@@ -1037,10 +1076,13 @@ class App:
                     self.put(y+1, 4, detail, attr if selected else curses.A_DIM)
             if not fs:
                 self.put(6, 2, 'Looking for streams...' if self.feed_pending else 'No available feeds. Refresh near game time or change the filter.')
-            self.put(h-5, 1, 'Enter play   / search   t test   g rank   o source')
-            self.put(h-4, 1, 'f side   i inspect   p player   s sport   r refresh')
-            self.put(h-3, 1, 'c cache   v video   u URL   ? help   Esc back   q quit')
-        self.put(h-1, 1, self.message)
+            if w < 60:
+                self.put(h-4, 1, 'Enter play  t test  g rank  Esc')
+                self.put(h-3, 1, '/ find  o source  f side  ? help q')
+            else:
+                self.put(h-4, 1, 'Enter play   t test   g rank   / search   Esc back')
+                self.put(h-3, 1, 'o source   f side   p player   r refresh   ? help   q quit')
+        self.put(h-1, 1, self.message, curses.A_DIM)
         self.scr.refresh()
 
     def refresh_games(self):
@@ -1128,10 +1170,20 @@ class App:
     def update_global_search(self):
         if self.search_index is None:
             self.search_index = smart_search.default_index()
+        if self.player_directory is None:
+            self.player_directory = players.Directory(self.search_index, LEAGUES)
         today = default_day()
         query = smart_search.parse_query(self.search_query, today)
         self.search_plan = smart_search.make_plan(self.search_index, query)
         query = self.search_plan.query
+        fragment = query.fragments[0] if query.fragments else ''
+        player_key = (fragment, query.league) if len(fragment) >= 3 else None
+        if player_key != self.player_key:
+            self.player_partial_key, self.player_partial = None, []
+        self.player_key = player_key
+        cached_player = self.player_cache.get(self.player_key)
+        self.player_due = (time.monotonic() + .35 if self.player_key and
+                           (not cached_player or cached_player[0] <= time.monotonic()) else None)
         work, sources = [], {}
         day = query.date or today
         if query.intent != 'replay' and day >= today:
@@ -1261,7 +1313,20 @@ class App:
             else:
                 archived.extend((league, item) for league in self.search_sources.get(key, ()) for item in cached[1])
         ranked = smart_search.rank(self.search_index, self.search_plan, games, archived, default_day())
-        self.search_results = self.grouped_search_results(ranked)
+        grouped = self.grouped_search_results(ranked)
+        cached_players = self.player_cache.get(self.player_key)
+        matches = (self.player_partial if self.player_key and self.player_partial_key == self.player_key else
+                   cached_players[1] if cached_players and not cached_players[2] else [])
+        player_hits = [smart_search.Hit('player', player.team.league, player.name, player, 1.0)
+                       for player in matches]
+        team_matches = self.search_index.resolve(self.search_plan.query.fragments[0]) if self.search_plan.query.fragments else ()
+        strong_team = bool(team_matches and team_matches[0][1] >= .9)
+        if player_hits and not strong_team:
+            # A fuzzy team match such as León for "lebron" must not bury a
+            # directly matching roster player.
+            self.search_results = player_hits + [hit for hit in ranked if hit.kind == 'team'][:3]
+        else:
+            self.search_results = grouped + player_hits
         keys = [item.key for item in self.search_results]
         if selected in keys:
             self.search_position = keys.index(selected)
@@ -1272,20 +1337,81 @@ class App:
         if self.mode != 'search': return
         pending = sum(1 for key in self.search_needed
                       if key in self.search_inflight or key not in self.search_cache)
-        count = sum(item.kind not in ('team', 'side') for item in self.search_results)
+        count = sum(item.kind not in ('team', 'side', 'player') for item in self.search_results)
+        player_count = sum(item.kind == 'player' for item in self.search_results)
+        player_pending = bool(self.player_key and (self.player_due is not None or self.player_key in self.player_inflight))
         unavailable = sum(1 for key in self.search_needed if key in self.search_cache and self.search_cache[key][2])
         if not self.search_query:
-            self.message = 'Start typing a team, matchup, or league.'
-        elif pending:
-            self.message = f'{count} games and replays found | searching {pending} sources...'
+            self.message = 'Start typing a player, team, matchup, or league.'
+        elif pending or player_pending:
+            self.message = (f'{player_count} players · checking...' if player_count and not count else
+                            f'{count} games and replays found | searching...')
         elif count:
             self.message = f'{count} games and replays found. Choose one or keep typing.'
             if unavailable: self.message += f' {unavailable} sources unavailable; Ctrl-R retries.'
+        elif player_count:
+            self.message = f'{player_count} players · Enter opens team.'
+        elif cached_players and cached_players[2] and not strong_team:
+            self.message = 'Player search unavailable. Ctrl-R retries.'
         elif self.search_plan.leagues:
             self.message = (f'No matches; {unavailable} sources unavailable. Ctrl-R retries.' if unavailable else
                             'No matching games or replays found. Try another team or date.')
         else:
-            self.message = 'Keep typing a team, matchup, or league.'
+            self.message = 'Keep typing a player, team, matchup, or league.'
+
+    def start_player_search(self):
+        if self.mode != 'search' or self.player_due is None or time.monotonic() < self.player_due: return
+        key = self.player_key
+        self.player_due = None
+        if not key or key in self.player_inflight: return
+        while True:
+            try:
+                stale = self.player_jobs.get_nowait()
+                self.player_inflight.discard(stale)
+            except queue.Empty: break
+        self.player_inflight.add(key)
+        self.player_jobs.put_nowait(key)
+        if not self.player_worker_started:
+            self.player_worker_started = True
+            threading.Thread(target=self.player_search_worker, name='player-search', daemon=True).start()
+
+    def player_search_worker(self):
+        while True:
+            key = self.player_jobs.get()
+            if key is None: return
+            canceled = lambda: self.closed.is_set() or self.mode != 'search' or key != self.player_key
+            try:
+                def publish(value):
+                    if not canceled(): self.player_queue.put((key, value, None, False, True))
+                value = self.player_directory.search(key[0], key[1], request, canceled, publish)
+                self.player_queue.put((key, value, None, False, False))
+            except concurrent.futures.CancelledError:
+                self.player_queue.put((key, [], None, True, False))
+            except Exception as exc:
+                self.player_queue.put((key, [], type(exc).__name__, False, False))
+
+    def poll_player_search(self):
+        changed = False
+        while True:
+            try: key, value, error, canceled, partial = self.player_queue.get_nowait()
+            except queue.Empty: break
+            if partial:
+                if key == self.player_key and self.mode == 'search':
+                    self.player_partial_key, self.player_partial = key, value
+                    changed = True
+                continue
+            self.player_inflight.discard(key)
+            if key == self.player_partial_key:
+                self.player_partial_key, self.player_partial = None, []
+            if not canceled:
+                ttl = 20 if error else 30 if any(not player.verified for player in value) else 300
+                self.player_cache[key] = (time.monotonic() + ttl, value, error)
+                while len(self.player_cache) > 96: self.player_cache.pop(next(iter(self.player_cache)))
+            elif key == self.player_key and not self.closed.is_set():
+                self.player_due = time.monotonic()
+            if key == self.player_key: changed = True
+        if changed: self.rebuild_global_results()
+        return changed
 
     def start_global_search(self):
         if self.mode != 'search': return
@@ -1341,6 +1467,18 @@ class App:
     def open_global_result(self):
         if not self.search_results: return
         hit = self.search_results[self.search_position]
+        if hit.kind == 'player':
+            query = self.search_plan.query
+            fragments = list(query.fragments)
+            fragments[0] = hit.item.team.display
+            text = ' vs '.join(fragments)
+            if query.league: text = query.league + ' ' + text
+            if query.date: text += ' ' + query.date.isoformat()
+            if query.intent == 'replay': text += ' replay'
+            elif query.intent == 'live': text += ' live'
+            self.search_query = text
+            self.update_global_search()
+            return
         if hit.kind == 'team':
             primary = self.search_plan.primary
             if primary and (hit.item.league, hit.item.id) == (primary.league, primary.id):
@@ -1906,6 +2044,11 @@ class App:
     def close(self):
         self.closed.set()
         self.stop_schedule_workers()
+        if self.player_worker_started:
+            while True:
+                try: self.player_jobs.get_nowait()
+                except queue.Empty: break
+            self.player_jobs.put_nowait(None)
         while True:
             try: self.feed_jobs.get_nowait()
             except queue.Empty: break
@@ -1941,10 +2084,12 @@ class App:
     def run(self):
         try:
             curses.curs_set(0)
-            if curses.has_colors():
+            if curses.has_colors() and not os.environ.get('NO_COLOR'):
                 curses.use_default_colors()
                 curses.init_pair(1, curses.COLOR_GREEN, -1)
                 self.live_color = curses.color_pair(1) | curses.A_BOLD
+                curses.init_pair(2, 105 if curses.COLORS >= 256 else curses.COLOR_MAGENTA, -1)
+                self.accent_color = curses.color_pair(2) | curses.A_BOLD
         except curses.error: pass
         self.scr.keypad(True)
         # Avoid terminal-specific insert/delete optimizations that can leave
@@ -1955,7 +2100,7 @@ class App:
         if self.mode == 'games': self.refresh_games()
         try:
             while True:
-                self.poll_games(); self.poll_global_search(); self.start_global_search(); self.poll_search_preview()
+                self.poll_games(); self.poll_global_search(); self.poll_player_search(); self.start_global_search(); self.start_player_search(); self.poll_search_preview()
                 self.poll_replays(); self.poll_feeds(); self.poll_auto_checks(); self.poll_manual_checks(); self.cancel_feed_action_if_changed(); self.poll_feed_actions(); self.poll_gui_players(); self.render(); key, typed = self.read_key()
                 if key == -1: continue
                 if self.mode == 'search':
@@ -1982,6 +2127,9 @@ class App:
                         self.search_query = ''; self.update_global_search()
                     elif key == 18:  # Ctrl-R
                         for work in self.search_needed: self.search_cache.pop(work, None)
+                        self.player_cache.pop(self.player_key, None)
+                        if self.player_directory: self.player_directory.clear()
+                        self.player_due = time.monotonic() if self.player_key else None
                         self.search_due = time.monotonic(); self.rebuild_global_results()
                     elif typed:
                         self.search_query += typed; self.update_global_search()

@@ -16,6 +16,8 @@ Run `./sports-cli` in a terminal, or `./sports-cli --list --league nba` for non-
 
 - `sports-cli`: the only user-facing executable; `sportscli/app.py`: schedules, sources, screens, asynchronous discovery, player launch and configuration.
 - `sportscli/smart_search.py`: local query parsing, team suggestions, and result ranking. `sportscli/data/teams.json` is the bundled ESPN team-name index; refresh it with `python3 -m sportscli.tools.update_teams` when appropriate.
+- `sportscli/players.py`: lazy player-name search and bounded roster verification; keep this separate from team search so slow rosters cannot block the UI.
+- `sportscli/progress.py`: optional Rich-backed download progress with a standard-library fallback; no model is downloaded by default.
 - `sportscli/providers.py`: bounded public-page discovery and supported embedded player resolution.
 - `sportscli/replays.py`: replay catalog listings, search, and per-replay server discovery.
 - `sportscli/relay.py`: session-only local HLS relay for tokenized, image-wrapped streams.
@@ -26,7 +28,7 @@ Run `./sports-cli` in a terminal, or `./sports-cli --list --league nba` for non-
 - `sportscli/tools/evaluate_ads.py`: offline evaluation against manually labeled local video; see `docs/ad-detector-testing.md` for labels, data splits, and limits.
 - `tests/`: offline tests for discovery, search, playback, relay, player state and UI behavior.
 
-Preserve the lazy workflow: global search uses a local team index and fetches at most three relevant leagues after a brief typing debounce. It may preview sources for one identified live game and look up replay servers only after a replay and provider are selected. Keep UI work responsive while directories load, retain the user's selection, and discard stale results when navigating away. Live schedules hide games ESPN marks completed; explicitly offline listings and sources that fail during a session are hidden until refresh. Replay archives intentionally include finished games.
+Preserve the lazy workflow: global search uses a local team index and fetches at most three relevant leagues after a brief typing debounce. A separate bounded worker looks up matching players and checks at most five rosters per query, with short-lived caching; clearly label unavailable roster checks. It may preview sources for one identified live game and look up replay servers only after a replay and provider are selected. Keep UI work responsive while directories load, retain the user's selection, and discard stale results when navigating away. Live schedules hide games ESPN marks completed; explicitly offline listings and sources that fail during a session are hidden until refresh. Replay archives intentionally include finished games.
 
 Ad mute requires an explicit run flag: `--ad-mute` uses cues from marked replays, `--ai-ad-observe` previews local NBA predictions without muting, and `--ai-ad-mute` enables experimental muting only for NBA in mpv. Model installation must occur only when `--install-ad-model` is explicitly requested; never commit weights or add the runtime to default setup. Preserve the user's own mute state, delete temporary frames, and do not transmit them. Real-broadcast tests have found false mutes during studio and bench footage; do not claim reliable live-ad detection.
 

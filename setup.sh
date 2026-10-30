@@ -19,10 +19,10 @@ fi
 npm install --prefix resolver --ignore-scripts --no-audit --no-fund
 if command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
   if ! python3 -m pip install --quiet --disable-pip-version-check --no-cache-dir --upgrade --target .deps -r sportscli/requirements.txt; then
-    echo 'RapidFuzz could not be installed; built-in search remains available.' >&2
+    echo 'Optional UI or search packages could not be installed; built-in fallbacks remain available.' >&2
   fi
 else
-  echo 'Python pip not found; built-in search remains available.' >&2
+  echo 'Python pip not found; built-in UI and search remain available.' >&2
 fi
 if command -v mpv >/dev/null 2>&1; then
   echo 'Ready: ./sports-cli'

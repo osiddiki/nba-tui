@@ -34,16 +34,18 @@ class EvaluateAdsTests(unittest.TestCase):
         class Decision:
             def update(self, score):
                 return score < .5
-        scores = iter([.9, .1, .2, .8])
-        report = evaluate_ads.evaluate(['a', 'b', 'c', 'd'],
+        scores = iter([.9, .1, .2, .1, .9, .8])
+        report = evaluate_ads.evaluate(['a', 'b', 'c', 'd', 'e', 'f'],
                                       [(10, 12, 'broadcast'), (12, 14, 'ad'),
-                                       (14, 16, 'promo')],
+                                       (14, 16, 'promo'), (16, 18, 'break'), (18, 20, 'overlay')],
                                       10, 2, lambda _: next(scores), Decision())
         self.assertEqual(report['counts']['broadcast'], {'samples': 1, 'muted': 0})
         self.assertEqual(report['counts']['ad'], {'samples': 1, 'muted': 1})
         self.assertEqual(report['counts']['promo'], {'samples': 1, 'muted': 1})
+        self.assertEqual(report['counts']['break'], {'samples': 1, 'muted': 1})
+        self.assertEqual(report['counts']['overlay'], {'samples': 1, 'muted': 0})
         self.assertEqual(report['counts']['unknown'], {'samples': 1, 'muted': 0})
-        self.assertEqual([sample['time'] for sample in report['samples']], [10, 12, 14, 16])
+        self.assertEqual([sample['time'] for sample in report['samples']], [10, 12, 14, 16, 18, 20])
 
     def test_invalid_model_scores_are_not_classified(self):
         for value in (True, float('nan'), -1, 2, None):
