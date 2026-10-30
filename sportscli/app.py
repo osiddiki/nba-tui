@@ -266,7 +266,7 @@ def describe_feed(feed, record=None, automatic=None):
     record = record if isinstance(record, dict) else {}
     height = record.get('height')
     quality = f'{height}p' if isinstance(height, int) and height >= 144 else f'~{listed_quality}' if listed_quality else '-'
-    status = {'checking':'Checking', 'OK':'OK', '?':'Unverified'}.get(automatic, automatic or 'Unverified')
+    status = {'checking':'Checking', 'testing':'Testing', 'OK':'OK', '?':'Unverified'}.get(automatic, automatic or 'Unverified')
     grade = grading.summary(record)
     if grade:
         grade = re.sub(r'\s+\d+p$', '', grade)
@@ -775,11 +775,22 @@ class App:
         self.help_scroll = 0
         self.live_color = 0
         self.loading_games = False
+        self.schedule_generation = 0
+        self.schedule_jobs = queue.Queue(maxsize=1)
+        self.schedule_result_lock = threading.Lock()
+        self.schedule_result = None
+        self.schedule_workers_started = False
+        self.schedule_workers = []
+        self.schedule_stop = threading.Event()
+        self.schedule_selected_key = None
+        self.schedule_selected_id = None
         self.filter = 'all'
         self.provider_filter = 'all'
         self.message = 'Choose a sport or press s to search.'
         self.errors = []
         self.feed_queue = queue.Queue()
+        self.feed_jobs = queue.Queue(maxsize=16)
+        self.feed_workers = []
         self.feed_generation = 0
         self.feed_sections = {}
         self.feed_order = []
@@ -788,7 +799,16 @@ class App:
         self.hidden_feeds = set()
         self.auto_checks = {}
         self.auto_queue = queue.Queue()
-        self.auto_slots = threading.BoundedSemaphore(3)
+        self.auto_jobs = queue.Queue(maxsize=24)
+        self.auto_workers = []
+        self.auto_generation = None
+        self.manual_checks = set()
+        self.manual_queue = queue.Queue()
+        self.manual_status = {}
+        self.action_serial = 0
+        self.action_current = None
+        self.action_inflight = set()
+        self.action_queue = queue.Queue()
         self.replay_queue = queue.Queue()
         self.replay_generation = 0
         self.replay_sections = {}
@@ -798,6 +818,8 @@ class App:
         self.replay_selection_touched = False
         self.helper = None
         self.relay = None
+        self.resource_lock = threading.Lock()
+        self.closed = threading.Event()
         self.gui_players = []
         self.resolver_owned = False
         self.cache = int(config.get('cache', 15)) if str(config.get('cache', 15)) in ('5','15','30') else 15
@@ -834,7 +856,13 @@ class App:
                  and (not query or query in (f.source + ' ' + f.label).casefold())]
         if self.rank_by_checks:
             history = self.config.get('health') if isinstance(self.config.get('health'), dict) else {}
-            feeds.sort(key=lambda feed: grading.score(history.get(grading.source_key(feed), {})), reverse=True)
+            def rank(feed):
+                status = self.manual_status.get(id(feed), self.auto_checks.get(id(feed)))
+                # Prefer a currently reachable segment, keep unchecked sources
+                # available, and place explicit HTTP failures below them.
+                reachability = 2 if status == 'OK' else 0 if isinstance(status, str) and status.startswith('HTTP ') else 1
+                return (reachability, *grading.score(history.get(grading.source_key(feed), {})))
+            feeds.sort(key=rank, reverse=True)
         return feeds
 
     def search_rows(self, width=None):
@@ -990,7 +1018,11 @@ class App:
                 y = 6 + index*2
                 selected = start+index == self.fi
                 history = self.config.get('health') if isinstance(self.config.get('health'), dict) else {}
-                view = describe_feed(feed, history.get(grading.source_key(feed), {}), self.auto_checks.get(id(feed)))
+                opening = self.action_current and self.action_current[1] == self.feed_generation and self.action_current[2] is feed
+                status = (('Opening' if self.action_current[3] == 'play' else 'Inspecting') if opening else
+                          'testing' if (self.feed_generation, id(feed)) in self.manual_checks else
+                          self.manual_status.get(id(feed), self.auto_checks.get(id(feed))))
+                view = describe_feed(feed, history.get(grading.source_key(feed), {}), status)
                 short_name = view.name if len(view.name) <= name_width else view.name[:name_width-1] + '…'
                 attr = curses.A_REVERSE if selected else 0
                 row = (f'{short_name:<{name_width}}  {view.side:5} {view.check}' if compact else
@@ -1012,19 +1044,81 @@ class App:
         self.scr.refresh()
 
     def refresh_games(self):
-        selected_id = self.games[self.gi].id if self.games and self.gi < len(self.games) else None
+        key = (self.league, self.day)
+        selected_id = None
+        if self.schedule_selected_key in (None, key):
+            selected_id = self.games[self.gi].id if self.games and self.gi < len(self.games) else None
+            if selected_id is None and self.schedule_selected_key == key:
+                selected_id = self.schedule_selected_id
+        self.schedule_selected_key, self.schedule_selected_id = key, selected_id
+        with self.schedule_result_lock:
+            self.schedule_generation += 1
+            generation = self.schedule_generation
+            self.schedule_result = None
         self.all_games = []; self.games = []; self.gi = 0; self.loading_games = True
         self.message = 'Loading games for this date...'; self.render()
-        try:
-            self.all_games = get_games(self.day, self.league); self.apply_search()
-            if selected_id:
-                self.gi = next((i for i, game in enumerate(self.games) if game.id == selected_id), 0)
-            self.message = f'{len(self.games)} games shown. Select one.'
-        except Exception as e:
+        while True:
+            try: self.schedule_jobs.get_nowait()
+            except queue.Empty: break
+        self.schedule_jobs.put_nowait((generation, self.day, self.league))
+        if not self.schedule_workers_started:
+            self.schedule_workers_started = True
+            for index in range(2):
+                worker = threading.Thread(target=self._schedule_worker, name=f'schedule-{index}', daemon=True)
+                self.schedule_workers.append(worker)
+                worker.start()
+
+    def _schedule_worker(self):
+        while True:
+            job = self.schedule_jobs.get()
+            if job is None:
+                # One sentinel wakes both workers even though the queue holds
+                # at most one pending schedule request.
+                try: self.schedule_jobs.put_nowait(None)
+                except queue.Full: pass
+                return
+            if self.schedule_stop.is_set(): return
+            generation, day, league = job
+            try:
+                games, error = get_games(day, league), None
+            except Exception as exc:
+                games, error = None, exc
+            with self.schedule_result_lock:
+                if not self.schedule_stop.is_set() and generation == self.schedule_generation:
+                    self.schedule_result = (generation, day, league, games, error)
+
+    def stop_schedule_workers(self):
+        self.schedule_stop.set()
+        with self.schedule_result_lock:
+            self.schedule_generation += 1
+            self.schedule_result = None
+        while True:
+            try: self.schedule_jobs.get_nowait()
+            except queue.Empty: break
+        try: self.schedule_jobs.put_nowait(None)
+        except queue.Full: pass
+
+    def poll_games(self):
+        if self.mode != 'games':
+            return
+        with self.schedule_result_lock:
+            result = self.schedule_result
+            self.schedule_result = None
+        if result is None:
+            return
+        generation, day, league, games, error = result
+        if generation != self.schedule_generation or day != self.day or league != self.league:
+            return
+        self.loading_games = False
+        if error is not None:
             self.all_games = []; self.games = []; self.gi = 0
-            self.message = f'Schedule unavailable: {type(e).__name__}. Press r to retry.'
-        finally:
-            self.loading_games = False
+            self.message = f'Schedule unavailable: {type(error).__name__}. Press r to retry.'
+            return
+        self.all_games = games
+        self.apply_search()
+        if self.schedule_selected_id:
+            self.gi = next((i for i, game in enumerate(self.games) if game.id == self.schedule_selected_id), 0)
+        self.message = f'{len(self.games)} games shown. Select one.'
 
     def apply_search(self):
         query = self.search.lower()
@@ -1289,7 +1383,7 @@ class App:
         self.errors = list(self.search_preview_errors)
         self.feed_pending = self.search_preview_pending
         self.fi = 0; self.feed_selection_touched = False
-        self.hidden_feeds.clear(); self.auto_checks.clear()
+        self.hidden_feeds.clear(); self.auto_checks.clear(); self.manual_status.clear()
         self.search_preview_adopt_generation = generation
         for feeds in self.feed_sections.values(): self.start_auto_checks(generation, feeds)
         self.message = f'{len(self.feeds)} choices found'
@@ -1352,16 +1446,30 @@ class App:
         self.feeds = []; self.errors = []; self.fi = 0
         self.hidden_feeds.clear()
         self.auto_checks.clear()
+        self.manual_status.clear()
         self.feed_sections = {}; self.feed_order = [name for name, _ in tasks]
         self.feed_pending = len(tasks); self.feed_selection_touched = False
-        self.message = 'Checking sources...'
+        self.message = 'Checking sources...' if tasks else 'No sources available.'
+        while True:
+            try: self.feed_jobs.get_nowait()
+            except queue.Empty: break
         for name, operation in tasks:
-            def worker(name=name, operation=operation):
-                try:
-                    self.feed_queue.put((generation, name, operation(), None))
-                except Exception as exc:
-                    self.feed_queue.put((generation, name, [], type(exc).__name__))
-            threading.Thread(target=worker, daemon=True).start()
+            try: self.feed_jobs.put_nowait((generation, name, operation))
+            except queue.Full: self.feed_queue.put((generation, name, [], 'Busy'))
+        if tasks and not self.feed_workers:
+            for index in range(6):
+                worker = threading.Thread(target=self._feed_worker, name=f'source-load-{index}', daemon=True)
+                self.feed_workers.append(worker); worker.start()
+
+    def _feed_worker(self):
+        while True:
+            job = self.feed_jobs.get()
+            if job is None or self.closed.is_set(): return
+            generation, name, operation = job
+            if generation != self.feed_generation: continue
+            try: feeds, error = operation(), None
+            except Exception as exc: feeds, error = [], type(exc).__name__
+            if not self.closed.is_set(): self.feed_queue.put((generation, name, feeds, error))
 
     def poll_feeds(self):
         active = (self.mode == 'feeds' or (self.mode == 'leagues' and self.league_cancel == 'feeds')
@@ -1381,8 +1489,9 @@ class App:
             self.feeds = [feed for source in self.feed_order for feed in self.feed_sections.get(source, [])]
             self.start_auto_checks(generation, feeds)
             visible = self.visible_feeds()
-            if selected is not None and selected in visible:
-                self.fi = visible.index(selected)
+            selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
+            if selected_index is not None:
+                self.fi = selected_index
             else:
                 self.fi = 0 if selected is None else min(self.fi, max(0, len(visible)-1))
             changed = True
@@ -1393,29 +1502,51 @@ class App:
         return changed
 
     def start_auto_checks(self, generation, feeds):
+        if self.closed.is_set() or generation != self.feed_generation: return
+        if generation != self.auto_generation:
+            self.auto_generation = generation
+            while True:
+                try: self.auto_jobs.get_nowait()
+                except queue.Empty: break
         for feed in [feed for feed in feeds if feed.kind in ('sf', 'direct', 'candidate')][:2]:
             self.auto_checks[id(feed)] = 'checking'
-            def worker(feed=feed):
-                with self.auto_slots:
-                    if generation != self.feed_generation: return
-                    try:
-                        result = quick_probe_feed(feed)
-                        status = 'OK' if result else '?'
-                    except urllib.error.HTTPError as exc:
-                        status = f'HTTP {exc.code}'
-                    except Exception:
-                        status = '?'
-                    self.auto_queue.put((generation, feed, status))
-            threading.Thread(target=worker, daemon=True).start()
+            try: self.auto_jobs.put_nowait((generation, feed))
+            except queue.Full: self.auto_checks[id(feed)] = '?'
+        if not self.auto_workers:
+            for index in range(3):
+                worker = threading.Thread(target=self._auto_check_worker, name=f'source-check-{index}', daemon=True)
+                self.auto_workers.append(worker); worker.start()
+
+    def _auto_check_worker(self):
+        while True:
+            job = self.auto_jobs.get()
+            if job is None or self.closed.is_set(): return
+            generation, feed = job
+            if generation != self.feed_generation: continue
+            try:
+                result = quick_probe_feed(feed)
+                status = 'OK' if result else '?'
+            except urllib.error.HTTPError as exc:
+                status = f'HTTP {exc.code}'
+            except Exception:
+                status = '?'
+            if not self.closed.is_set(): self.auto_queue.put((generation, feed, status))
 
     def poll_auto_checks(self):
         changed = False
+        before = self.visible_feeds() if self.rank_by_checks else []
+        selected = before[self.fi] if self.fi < len(before) else None
+        old_index = self.fi
         while True:
             try: generation, feed, status = self.auto_queue.get_nowait()
             except queue.Empty: break
             if generation != self.feed_generation or id(feed) not in self.auto_checks: continue
             self.auto_checks[id(feed)] = status
             changed = True
+        if changed and self.rank_by_checks:
+            visible = self.visible_feeds()
+            selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
+            self.fi = selected_index if selected_index is not None else min(old_index, max(0, len(visible)-1))
         return changed
 
     def prompt(self, label, initial=''):
@@ -1462,23 +1593,36 @@ class App:
             return False
 
     def ensure_helper(self):
-        if self.helper_running(): return
-        directory = self.config.get('resolver_dir') or os.environ.get('NBA_RESOLVER_DIR', '') or str(pathlib.Path(__file__).resolve().parent.parent / 'resolver')
-        if not directory:
-            raise DependencyError('Set up the resolver and press d to select its folder; see README.')
-        entry = pathlib.Path(directory).expanduser() / 'src/server.js'
-        if not entry.is_file() or not (entry.parent.parent / 'node_modules').is_dir():
-            raise DependencyError('Resolver or dependencies missing; see README.')
-        if not shutil.which('node'):
-            raise DependencyError('Node.js is required for the resolver.')
-        env = os.environ.copy(); env.update({'HOST':'127.0.0.1', 'PORT':'38765', 'NODE_USE_ENV_PROXY':'1'})
-        self.helper = subprocess.Popen(['node', str(entry.resolve())], cwd=str(entry.parent.parent), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.resolver_owned = True
-        for _ in range(35):
-            if self.helper.poll() is not None: raise DependencyError('Resolver failed to start; run npm install in its folder.')
+        # A manual test and playback can resolve sources concurrently. Start
+        # at most one helper and never start a new one after the app closes.
+        with self.resource_lock:
+            if self.closed.is_set(): raise DependencyError('The app is closing.')
             if self.helper_running(): return
-            time.sleep(.1)
+            if self.helper is None or self.helper.poll() is not None:
+                directory = self.config.get('resolver_dir') or os.environ.get('NBA_RESOLVER_DIR', '') or str(pathlib.Path(__file__).resolve().parent.parent / 'resolver')
+                if not directory:
+                    raise DependencyError('Set up the resolver and press d to select its folder; see README.')
+                entry = pathlib.Path(directory).expanduser() / 'src/server.js'
+                if not entry.is_file() or not (entry.parent.parent / 'node_modules').is_dir():
+                    raise DependencyError('Resolver or dependencies missing; see README.')
+                if not shutil.which('node'):
+                    raise DependencyError('Node.js is required for the resolver.')
+                env = os.environ.copy(); env.update({'HOST':'127.0.0.1', 'PORT':'38765', 'NODE_USE_ENV_PROXY':'1'})
+                self.helper = subprocess.Popen(['node', str(entry.resolve())], cwd=str(entry.parent.parent), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.resolver_owned = True
+            helper = self.helper
+        for _ in range(35):
+            if self.closed.is_set(): raise DependencyError('The app is closing.')
+            if helper.poll() is not None: raise DependencyError('Resolver failed to start; run npm install in its folder.')
+            if self.helper_running(): return
+            self.closed.wait(.1)
         raise DependencyError('Resolver did not start on localhost:38765.')
+
+    def get_relay(self):
+        with self.resource_lock:
+            if self.closed.is_set(): raise DependencyError('The app is closing.')
+            if self.relay is None: self.relay = relay.Relay()
+            return self.relay
 
     def hide_feed(self, feed):
         self.hidden_feeds.add(id(feed))
@@ -1494,8 +1638,7 @@ class App:
             elif found['kind'] == 'ppv':
                 feed = Feed(feed.source, feed.label, feed.side, found['url'], 'ppv')
             elif found['kind'] == 'relay':
-                if self.relay is None: self.relay = relay.Relay()
-                url = self.relay.add(found['url'],found['edge'],found['channel'],found['referer'])
+                url = self.get_relay().add(found['url'],found['edge'],found['channel'],found['referer'])
                 check_playlist(url)
                 return url, {}
             else:
@@ -1515,9 +1658,8 @@ class App:
                 except urllib.error.HTTPError as exc:
                     if exc.code != 403 or attempt: raise
             if wrapped:
-                if self.relay is None: self.relay = relay.Relay()
-                url = self.relay.add_streamfree(url, headers['Referer'],
-                                                lambda: resolve_streamfree(feed), manifest)
+                url = self.get_relay().add_streamfree(url, headers['Referer'],
+                                                      lambda: resolve_streamfree(feed), manifest)
                 check_playlist(url)
                 return url, {}
         if feed.kind == 'ppv':
@@ -1533,31 +1675,40 @@ class App:
             check_playlist(url)
         return url, headers
 
-    def play(self, feed):
+    def player_ready(self, feed):
         if feed.kind == 'web':
-            self.message = 'This add-on supplied a browser-only source.'; return
+            self.message = 'This add-on supplied a browser-only source.'; return False
         if (self.ai_ad_mute or self.ai_ad_observe) and self.player != 'mpv':
-            self.message = 'AI ad detection requires mpv. Press p to switch players.'; return
+            self.message = 'AI ad detection requires mpv. Press p to switch players.'; return False
         if (self.ai_ad_mute or self.ai_ad_observe) and not ai_ad_mute.installed():
-            self.message = 'AI detector not installed. Run ./sports-cli --install-ad-model.'; return
+            self.message = 'AI detector not installed. Run ./sports-cli --install-ad-model.'; return False
         iina = find_iina() if self.player == 'iina' else None
         celluloid = find_celluloid() if self.player == 'celluloid' else None
         if self.player == 'iina' and not iina:
-            self.message = 'IINA not found. Install it or press p to switch to mpv.'; return
+            self.message = 'IINA not found. Install it or press p to switch to mpv.'; return False
         if self.player == 'celluloid' and not celluloid:
-            self.message = 'Celluloid not found. Install it or press p to switch to mpv.'; return
+            self.message = 'Celluloid not found. Install it or press p to switch to mpv.'; return False
         if self.player == 'mpv' and not shutil.which('mpv'):
-            self.message = 'mpv is not installed or not on PATH.'; return
-        self.message = 'Resolving selected stream...'; self.render()
-        try:
-            url, headers = self.resolve_feed(feed)
-        except (OSError, ValueError, KeyError, RuntimeError) as e:
-            if not isinstance(e, DependencyError):
-                self.hide_feed(feed)
-                self.message = f'Stream unavailable: {e}. Hidden until refresh.'
-            else:
-                self.message = str(e)
-            return
+            self.message = 'mpv is not installed or not on PATH.'; return False
+        return True
+
+    def play(self, feed, *, resolved=None):
+        if not self.player_ready(feed): return
+        iina = find_iina() if self.player == 'iina' else None
+        celluloid = find_celluloid() if self.player == 'celluloid' else None
+        if resolved is None:
+            self.message = 'Resolving selected stream...'; self.render()
+            try:
+                url, headers = self.resolve_feed(feed)
+            except (OSError, ValueError, KeyError, RuntimeError) as e:
+                if not isinstance(e, DependencyError):
+                    self.hide_feed(feed)
+                    self.message = f'Stream unavailable: {e}. Hidden until refresh.'
+                else:
+                    self.message = str(e)
+                return
+        else:
+            url, headers = resolved
         if self.player == 'iina':
             try:
                 result = subprocess.run(iina_command(iina, url, headers, cache=self.cache),
@@ -1621,46 +1772,163 @@ class App:
             if temporary: temporary.cleanup()
             curses.reset_prog_mode(); self.scr.refresh()
 
+    def begin_feed_action(self, feed, action):
+        """Resolve in the background; player and terminal operations stay on the UI thread."""
+        if action not in ('play', 'inspect'): raise ValueError('Unknown source action')
+        if action == 'play' and not self.player_ready(feed): return
+        if action == 'inspect' and feed.kind == 'web':
+            self.message = 'This source has no playable media URL.'; return
+        current = self.action_current
+        if current and current[1] == self.feed_generation and current[2] is feed and current[3] == action:
+            self.message = 'This source is already being resolved.'; return
+        if len(self.action_inflight) >= 2:
+            self.message = 'Two sources are resolving; try again when one finishes.'; return
+        self.action_serial += 1
+        serial, generation = self.action_serial, self.feed_generation
+        self.action_current = (serial, generation, feed, action)
+        self.action_inflight.add(serial)
+        self.message = f'{"Opening" if action == "play" else "Inspecting"} {feed.source}; Esc cancels.'
+        def worker():
+            try:
+                url, headers = self.resolve_feed(feed)
+                result, error = (url, headers), None
+            except Exception as exc:
+                result, error = None, exc
+            if not self.closed.is_set(): self.action_queue.put((serial, generation, feed, action, result, error))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def show_stream_url(self, url, headers):
+        curses.def_prog_mode(); curses.endwin()
+        try:
+            print('\nMedia URL (may expire; localhost links need this app open):\n'+url)
+            for name, value in headers.items(): print(name+': '+value)
+            try: input('\nPress Enter to return...')
+            except EOFError: pass
+        finally:
+            curses.reset_prog_mode(); self.scr.clear(); self.scr.refresh()
+        self.message = 'Stream link shown.'
+
+    def cancel_feed_action_if_changed(self):
+        current = self.action_current
+        if not current: return
+        _, generation, feed, _ = current
+        visible = self.visible_feeds() if self.mode == 'feeds' else []
+        if (generation != self.feed_generation or self.mode != 'feeds' or
+                self.fi >= len(visible) or visible[self.fi] is not feed):
+            self.action_current = None
+            if self.mode == 'feeds' and generation == self.feed_generation:
+                self.message = 'Source changed; previous request canceled.'
+
+    def poll_feed_actions(self):
+        while True:
+            try: serial, generation, feed, action, result, error = self.action_queue.get_nowait()
+            except queue.Empty: break
+            self.action_inflight.discard(serial)
+            current = self.action_current
+            if not current or current[0] != serial: continue
+            self.action_current = None
+            if self.closed.is_set() or generation != self.feed_generation or self.mode != 'feeds': continue
+            visible = self.visible_feeds()
+            if self.fi >= len(visible) or visible[self.fi] is not feed:
+                self.message = 'Source changed; previous request canceled.'
+                continue
+            if error:
+                if action == 'play' and not isinstance(error, DependencyError):
+                    self.hide_feed(feed)
+                    self.message = f'Stream unavailable: {error}. Hidden until refresh.'
+                else:
+                    self.message = str(error) if isinstance(error, DependencyError) else f'Stream unavailable: {error}'
+            elif action == 'play':
+                self.play(feed, resolved=result)
+            else:
+                self.show_stream_url(*result)
+
     def test_feed(self, feed):
         if feed.kind == 'web':
             self.message = 'This source has no playable media URL.'; return
-        self.message = 'Testing source and measuring quality...'; self.render()
-        result = {}; error = None
-        try:
-            url, headers = self.resolve_feed(feed)
-            result = grading.inspect_stream(url, headers)
-        except (OSError, ValueError, KeyError, RuntimeError) as exc:
-            error = exc
-        history = self.config.get('health')
-        if not isinstance(history, dict): history = {}; self.config['health'] = history
-        key = grading.source_key(feed)
-        record = history.get(key)
-        if not isinstance(record, dict): record = {}; history[key] = record
-        checks = record.get('checks') if isinstance(record.get('checks'), list) else []
-        if isinstance(error, DependencyError):
-            self.message = str(error)
-            return
-        record['checks'] = (checks + [error is None])[-20:]
-        if error is None: record['latency_ms'] = result['latency_ms']
-        if result.get('height'): record['height'] = result['height']
-        save_config(self.config)
-        visible = self.visible_feeds()
-        if feed in visible: self.fi = visible.index(feed)
-        label = grading.summary(record)
-        if error:
-            self.hide_feed(feed)
-            self.message = f'Test failed ({str(error) or type(error).__name__}); hidden until refresh. | {label}'
-        else:
-            self.message = f'Segment reachable in {record["latency_ms"]} ms | {label}'
+        generation = self.feed_generation
+        token = (generation, id(feed))
+        if token in self.manual_checks:
+            self.message = 'This source is already being tested.'; return
+        if len(self.manual_checks) >= 2:
+            self.message = 'Two source tests are running; try again when one finishes.'; return
+        self.manual_checks.add(token)
+        self.message = f'Testing {feed.source}; you can keep browsing.'
+        def worker():
+            try:
+                url, headers = self.resolve_feed(feed)
+                if self.closed.is_set(): return
+                result, error = grading.inspect_stream(url, headers), None
+            except Exception as exc:
+                result, error = {}, exc
+            self.manual_queue.put((generation, feed, result, error))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def poll_manual_checks(self):
+        changed = False
+        while True:
+            try: generation, feed, result, error = self.manual_queue.get_nowait()
+            except queue.Empty: break
+            self.manual_checks.discard((generation, id(feed)))
+            if generation != self.feed_generation or not any(item is feed for item in self.feeds):
+                continue
+            changed = True
+            if isinstance(error, DependencyError):
+                if self.mode == 'feeds': self.message = str(error)
+                continue
+            before = self.visible_feeds()
+            selected = before[self.fi] if self.fi < len(before) else None
+            old_index = self.fi
+            history = self.config.get('health')
+            if not isinstance(history, dict): history = {}; self.config['health'] = history
+            key = grading.source_key(feed)
+            record = history.get(key)
+            if not isinstance(record, dict): record = {}; history[key] = record
+            checks = record.get('checks') if isinstance(record.get('checks'), list) else []
+            record['checks'] = (checks + [error is None])[-20:]
+            if error is None:
+                record['latency_ms'] = result['latency_ms']
+                self.manual_status[id(feed)] = 'OK'
+            if result.get('height'): record['height'] = result['height']
+            save_config(self.config)
+            if error: self.hidden_feeds.add(id(feed))
+            visible = self.visible_feeds()
+            selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
+            self.fi = selected_index if selected_index is not None else min(old_index, max(0, len(visible)-1))
+            label = grading.summary(record)
+            if self.mode == 'feeds':
+                if error:
+                    self.message = f'Test failed ({str(error) or type(error).__name__}); hidden until refresh. | {label}'
+                else:
+                    self.message = f'Segment reachable in {record["latency_ms"]} ms | {label}'
+        return changed
 
     def close(self):
+        self.closed.set()
+        self.stop_schedule_workers()
+        while True:
+            try: self.feed_jobs.get_nowait()
+            except queue.Empty: break
+        for _ in self.feed_workers: self.feed_jobs.put_nowait(None)
+        while True:
+            try: self.auto_jobs.get_nowait()
+            except queue.Empty: break
+        for _ in self.auto_workers: self.auto_jobs.put_nowait(None)
         if self.search_workers_started:
+            self.search_needed.clear()
+            while True:
+                try: self.search_jobs.get_nowait()
+                except queue.Empty: break
             for _ in range(3): self.search_jobs.put(None)
-        if self.relay: self.relay.close()
-        if self.resolver_owned and self.helper and self.helper.poll() is None:
-            self.helper.terminate()
-            try: self.helper.wait(timeout=3)
-            except subprocess.TimeoutExpired: self.helper.kill(); self.helper.wait()
+        with self.resource_lock:
+            local_relay, self.relay = self.relay, None
+            helper = self.helper if self.resolver_owned else None
+            self.resolver_owned = False
+        if local_relay: local_relay.close()
+        if helper and helper.poll() is None:
+            helper.terminate()
+            try: helper.wait(timeout=3)
+            except subprocess.TimeoutExpired: helper.kill(); helper.wait()
 
     def poll_gui_players(self):
         running = []
@@ -1687,8 +1955,8 @@ class App:
         if self.mode == 'games': self.refresh_games()
         try:
             while True:
-                self.poll_global_search(); self.start_global_search(); self.poll_search_preview()
-                self.poll_replays(); self.poll_feeds(); self.poll_auto_checks(); self.poll_gui_players(); self.render(); key, typed = self.read_key()
+                self.poll_games(); self.poll_global_search(); self.start_global_search(); self.poll_search_preview()
+                self.poll_replays(); self.poll_feeds(); self.poll_auto_checks(); self.poll_manual_checks(); self.cancel_feed_action_if_changed(); self.poll_feed_actions(); self.poll_gui_players(); self.render(); key, typed = self.read_key()
                 if key == -1: continue
                 if self.mode == 'search':
                     if key in (17, 24): break  # Ctrl-Q or Ctrl-X
@@ -1768,7 +2036,7 @@ class App:
                         self.feed_return = 'replay_sources'; self.feed_context = 'replay'; self.mode = 'feeds'
                         self.filter = 'all'; self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
                     elif self.mode == 'feeds' and self.visible_feeds():
-                        self.feed_selection_touched = True; self.play(self.visible_feeds()[self.fi])
+                        self.feed_selection_touched = True; self.begin_feed_action(self.visible_feeds()[self.fi], 'play')
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'feeds':
                     self.feed_generation += 1; self.feed_pending = 0
                     if self.feed_return in ('search', 'replay_sources'):
@@ -1832,25 +2100,13 @@ class App:
                     selected = visible[self.fi] if self.fi < len(visible) else None
                     self.rank_by_checks = not self.rank_by_checks
                     visible = self.visible_feeds()
-                    self.fi = visible.index(selected) if selected in visible else 0
+                    selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
+                    self.fi = selected_index if selected_index is not None else 0
                     self.feed_selection_touched = True
-                    self.message = 'Ranked by your checks.' if self.rank_by_checks else 'Directory order.'
+                    self.message = 'Ranked by reachability and your checks.' if self.rank_by_checks else 'Directory order.'
                 elif self.mode == 'feeds' and key == ord('i') and self.visible_feeds():
                     feed = self.visible_feeds()[self.fi]
-                    self.message = 'Resolving selected stream...'; self.render()
-                    try:
-                        if feed.kind == 'web': raise ValueError('No media URL for this source')
-                        url, headers = self.resolve_feed(feed)
-                        curses.def_prog_mode(); curses.endwin()
-                        try:
-                            print('\nMedia URL (may expire; localhost links need this app open):\n'+url)
-                            for name, value in headers.items(): print(name+': '+value)
-                            input('\nPress Enter to return...')
-                        finally:
-                            curses.reset_prog_mode(); self.scr.clear(); self.scr.refresh()
-                        self.message = 'Stream link shown.'
-                    except (OSError, ValueError, KeyError, RuntimeError) as e:
-                        self.message = f'Stream unavailable: {e}'
+                    self.feed_selection_touched = True; self.begin_feed_action(feed, 'inspect')
                 elif self.mode == 'feeds' and key == ord('c'):
                     self.cache = {5:15,15:30,30:5}[self.cache]; self.config['cache']=self.cache; save_config(self.config)
                 elif self.mode == 'feeds' and key == ord('v'):

@@ -206,6 +206,7 @@ class DiscoveryTests(unittest.TestCase):
             if not slow_gate.wait(2): raise RuntimeError('timed out')
             return [other_feed]
         app = nba.App(None,{})
+        self.addCleanup(app.close)
         app.games = [self.game]; app.mode = 'feeds'
         probe_patcher = patch.object(app, 'start_auto_checks')
         probe_patcher.start(); self.addCleanup(probe_patcher.stop)
@@ -251,6 +252,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_failed_feed_is_hidden_until_refresh_but_missing_dependency_is_not(self):
         app = nba.App(None,{})
+        self.addCleanup(app.close)
         app.games = [self.game]; app.mode = 'feeds'
         probe_patcher = patch.object(app, 'start_auto_checks')
         probe_patcher.start(); self.addCleanup(probe_patcher.stop)
@@ -260,6 +262,10 @@ class DiscoveryTests(unittest.TestCase):
         with patch.object(app,'render'), patch.object(app,'resolve_feed',side_effect=OSError('offline')), \
              patch.object(nba,'save_config'):
             app.test_feed(dead)
+            end = time.monotonic() + 2
+            while app.manual_checks and time.monotonic() < end:
+                app.poll_manual_checks(); time.sleep(.01)
+            self.assertFalse(app.manual_checks)
         self.assertEqual(app.visible_feeds(), [good])
         self.assertIn('hidden until refresh', app.message)
         self.assertEqual(app.config['health']['Source:Dead']['checks'], [False])
@@ -272,11 +278,16 @@ class DiscoveryTests(unittest.TestCase):
         with patch.object(app,'render'), patch.object(app,'resolve_feed',side_effect=nba.DependencyError('Install resolver')), \
              patch.object(nba,'save_config'):
             app.test_feed(good)
+            end = time.monotonic() + 2
+            while app.manual_checks and time.monotonic() < end:
+                app.poll_manual_checks(); time.sleep(.01)
+            self.assertFalse(app.manual_checks)
         self.assertEqual(app.visible_feeds(), [dead,good])
         self.assertEqual(app.message, 'Install resolver')
 
     def test_automatic_checks_are_bounded_and_keep_transient_failures_visible(self):
         app = nba.App(None,{})
+        self.addCleanup(app.close)
         app.games = [self.game]; app.mode = 'feeds'; app.feed_generation = 1
         feeds = [nba.Feed('Source', name, url='https://example.com/' + name, kind='direct')
                  for name in ('one', 'two', 'three')]

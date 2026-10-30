@@ -44,7 +44,7 @@ The setup script installs a pinned copy of the [PPV HLS resolver](https://github
 1. Select a sport or league on the opening screen, or press `s`, `/`, or `Space` to search across sports. Use `./sports-cli --search` to open directly into search.
 2. Try `warriors`, `mavs rockets`, `lakers vs blazers oct 27`, or `tamu vs alabama`. Results are grouped under the team, with live broadcasts, recent replays, and upcoming games. Matching team suggestions follow below. The app checks a relevant team's upcoming schedule and, for specific NBA matchups, searches a few older replay pages in the background.
 3. Use the arrow keys and `Enter` to open a game, a home or away broadcast list, or a replay. Home and away choices appear when a directory identifies those sides; open the live game to see all sources, including unlabeled ones. Replay listings for the same game are grouped; choose a provider, then a server. In search, `Ctrl-U` clears the query, `Ctrl-R` refreshes, and `Tab` returns to sports.
-4. Select a stream and press `Enter` to play. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `f` by broadcast side, or `/` to search providers and channels. Press `r` to refresh.
+4. Select a stream and press `Enter` to play. Resolution runs in the background while you browse; going back or choosing another stream cancels the pending launch. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `f` by broadcast side, or `/` to search providers and channels. Press `r` to refresh.
 5. On macOS, press `p` to switch between mpv and IINA. On Linux, `p` switches between mpv and Celluloid. The graphical player must be installed first.
 6. To browse archives by league, select a league and press `R` in its game list. Press `R` again to return to games. Press `s` in a game, replay, or stream list to choose a different sport.
 
@@ -95,9 +95,9 @@ The replay view uses Basketball Replays and Basketball Video for basketball, NFL
 
 ### Source checks and ranking
 
-Press `t` to resolve the selected source and read part of one segment from your connection. The app shows video height when it can determine it from the playlist or an optional `ffprobe` installation. This is a point-in-time check, not a sustained playback or buffering test.
+Press `t` to resolve the selected source and read part of one segment from your connection. The test runs in the background, so you can keep browsing; up to two manual tests can run at once. The app shows video height when it can determine it from the playlist or an optional `ffprobe` installation. This is a point-in-time check, not a sustained playback or buffering test.
 
-The last 20 manual `t` checks are stored per provider, server, or channel; background checks do not affect grades. After at least three tests, A, B, C, and D correspond to success rates of at least 90%, 70%, 50%, and below 50%; fewer tests show `?`. The adjacent count shows the number of successful and total checks. Press `g` to rank tested sources by these results.
+The last 20 manual `t` checks are stored per provider, server, or channel; background checks do not affect grades. After at least three tests, A, B, C, and D correspond to success rates of at least 90%, 70%, 50%, and below 50%; fewer tests show `?`. The adjacent count shows the number of successful and total checks. Press `g` to rank sources: those with a recently reachable segment come first, followed by unchecked choices and then explicit HTTP failures. Previous manual results break ties within those groups. Your selection stays on the same source as new checks arrive.
 
 ### Ad mute
 
