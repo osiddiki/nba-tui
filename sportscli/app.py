@@ -1649,8 +1649,15 @@ class App:
         self.message = 'Searching replay catalogs...' if specs else 'No replay catalog configured for this league.'
         for spec in specs:
             def worker(spec=spec, query=self.replay_search):
-                try: self.replay_queue.put((generation, spec[0], replays.listing(spec, query), None))
-                except Exception as exc: self.replay_queue.put((generation, spec[0], [], type(exc).__name__))
+                try: items = replays.listing(spec, query)
+                except Exception as exc: self.replay_queue.put((generation, spec[0], [], type(exc).__name__)); return
+                if query:
+                    # Archive site searches return only recent games; older ones sit on later pages.
+                    try: items += search_replay_pages(spec, query, canceled=lambda: generation != self.replay_generation)
+                    except Exception: pass
+                    unique = {item.url: item for item in items}
+                    items = sorted(unique.values(), key=lambda item: smart_search.replay_date(item.title) or dt.date.min, reverse=True)
+                self.replay_queue.put((generation, spec[0], items, None))
             threading.Thread(target=worker, daemon=True).start()
 
     def poll_replays(self):

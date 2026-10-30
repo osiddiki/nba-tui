@@ -153,6 +153,19 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 5)
         self.assertEqual(len({r.url for r in rows}), 5)
 
+    def test_replays_filter_includes_older_archive_pages(self):
+        app = nba.App(None, {})
+        app.league = 'nba'; app.replay_search = 'Lakers'
+        recent = [replays.Replay('Basketball Video', 'Lakers vs Clippers NBA October 28, 2026', 'https://example.com/28')]
+        older = [replays.Replay('Basketball Video', 'Lakers vs Jazz NBA October 25, 2026', 'https://example.com/25'),
+                 replays.Replay('Basketball Video', 'Lakers vs Clippers NBA October 28, 2026', 'https://example.com/28')]
+        spec = ('Basketball Video', 'https://basketball-video.com/2026-27', 'nba')
+        with patch.object(replays, 'catalogs', return_value=[spec]), patch.object(replays, 'listing', return_value=list(recent)), \
+             patch.object(nba, 'search_replay_pages', return_value=older):
+            app.refresh_replays()
+            item = app.replay_queue.get(timeout=2)
+        self.assertEqual([r.url for r in item[2]], ['https://example.com/28', 'https://example.com/25'])
+
     def test_matchup_replay_lookup_stops_when_query_changes(self):
         spec = ('Basketball Video','https://basketball-video.com/2026-27','nba')
         with patch.object(replays, 'listing') as fetch:
