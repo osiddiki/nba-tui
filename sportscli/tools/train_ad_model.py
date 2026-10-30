@@ -9,7 +9,11 @@ described in docs/ad-detector-testing.md:
 
     {"recordings": [{"video": "game1.mp4", "labels": "game1.json", "league": "nba"},
                     {"video": "game2.mkv", "labels": "game2.json", "league": "nfl",
-                     "broadcast": "nfl-2025-wk3", "start": 300, "duration": 1800}]}
+                     "broadcast": "nfl-2025-wk3", "start": 300, "duration": 1800},
+                    {"frames": "replay1/", "tags": "replay1/tags.json", "league": "epl"}]}
+
+A ``frames`` entry is a folder of stills from label_frames (or any images named
+by their position in seconds) with a tags.json mapping file names to labels.
 
 Whole broadcasts are held out for evaluation, never individual frames. When the
 original NBA model is installed it supplies soft labels for unlabeled time, so a
@@ -47,6 +51,19 @@ def frames(video, start, duration, every, size):
     return images, [start + i * every for i in range(count)]
 
 
+def still_frames(folder, tags, size):
+    """Load tagged stills named by position, such as 000123.0.jpg, at the given size."""
+    import numpy as np
+    from PIL import Image
+    height, width = size
+    images, positions, labels = [], [], []
+    for name, label in sorted(tags.items(), key=lambda item: float(pathlib.Path(item[0]).stem)):
+        with Image.open(folder / name) as image:
+            images.append(np.asarray(image.convert('RGB').resize((width, height), Image.BILINEAR)))
+        positions.append(float(pathlib.Path(name).stem)); labels.append(label)
+    return np.stack(images), positions, labels
+
+
 def load_teacher(model):
     """Score frames with the original NBA model to soft-label unlabeled time."""
     import tensorflow as tf
@@ -67,14 +84,21 @@ def load_dataset(manifest, every, teacher, promo, teacher_weight):
     document = json.loads(manifest.read_text(encoding='utf-8'))
     recordings = []
     for item in document.get('recordings', []):
-        video = (base / item['video']).resolve()
-        intervals = evaluate_ads.read_intervals(base / item['labels']) if item.get('labels') else []
         league = str(item.get('league', 'nba'))
-        broadcast = str(item.get('broadcast') or video.stem)
-        images, positions = frames(video, float(item.get('start', 0)), item.get('duration'), every, TEACHER_SIZE)
+        if item.get('frames'):
+            folder = (base / item['frames']).resolve()
+            tags = json.loads((base / item.get('tags', pathlib.Path(item['frames']) / 'tags.json')).read_text(encoding='utf-8'))
+            if any(label not in evaluate_ads.LABELS for label in tags.values()): raise ValueError(f'Unknown label in {folder}')
+            broadcast = str(item.get('broadcast') or folder.name)
+            images, positions, tagged = still_frames(folder, tags, TEACHER_SIZE)
+        else:
+            video = (base / item['video']).resolve()
+            intervals = evaluate_ads.read_intervals(base / item['labels']) if item.get('labels') else []
+            broadcast = str(item.get('broadcast') or video.stem)
+            images, positions = frames(video, float(item.get('start', 0)), item.get('duration'), every, TEACHER_SIZE)
+            tagged = [evaluate_ads.label_at(intervals, position) for position in positions]
         targets, weights, labels, soft = [], [], [], []
-        for image, position in zip(images, positions):
-            label = evaluate_ads.label_at(intervals, position)
+        for image, position, label in zip(images, positions, tagged):
             teacher_score = teacher(image) if teacher else None
             soft.append(teacher_score)
             if label == 'promo' and promo != 'ignore': label_target = TARGETS[promo]

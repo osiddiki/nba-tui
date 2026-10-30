@@ -86,6 +86,10 @@ python3 -m sportscli.tools.label_frames intervals ~/ad-data/game-frames/tags.jso
 ```
 
 Model-generated tags are useful for training but can confuse promos with paid
+ads. Sparse stills, such as one frame every 45 seconds from a replay, need no
+video file: list the folder and its `tags.json` as a `frames` entry in the
+manifest. Replay archives usually have commercials cut out, so they add
+coverage, studio and bench examples rather than ads; record live games for
 ads. Check the labels of the held-out broadcasts yourself so the evaluation
 remains trustworthy. List the recordings in a manifest (see the module
 docstring), then train with TensorFlow 2.16 and Pillow in a separate
