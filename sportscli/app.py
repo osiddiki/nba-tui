@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
 UTC = dt.timezone.utc
+SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 ESPN = 'https://site.api.espn.com/apis/site/v2/sports'
 LEAGUES = {
@@ -969,12 +970,24 @@ class App:
                 rows.append((i, f'      {LEAGUES[hit.league][0]}  {hit.title}', ''))
         return rows
 
+    def busy(self):
+        """Whether background work the user is waiting on is still running."""
+        return bool(self.loading_games or self.channels_loading or self.replay_pending or self.feed_pending
+                    or self.action_inflight or self.search_inflight & self.search_needed)
+
+    @staticmethod
+    def spinner():
+        # One frame per redraw tick; the UI redraws every 150 ms while it waits for keys.
+        return SPINNER[int(time.monotonic() / .1) % len(SPINNER)]
+
     def render(self):
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         self.put(0, 1, 'SPORTS CLI', self.accent_color)
         heading = {'search':'Find a game', 'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'replay_sources':'Replay sources', 'channels':'Live TV', 'feeds':'Broadcasts', 'help':'Help'}
-        self.put(1, 1, heading.get(self.mode, ''), curses.A_BOLD)
+        title = heading.get(self.mode, '')
+        self.put(1, 1, title, curses.A_BOLD)
+        if self.busy(): self.put(1, len(title) + 2, self.spinner(), self.accent_color)
         if h < 12 or w < 36:
             self.put(3, 1, 'Please enlarge your terminal to at least 36 x 12.')
             self.put(h-2, 1, 'Ctrl-X quit' if self.mode == 'search' else 'q quit')
@@ -997,7 +1010,7 @@ class App:
                 self.put(y, 2, f'{">" if selected else " "} {text}', attr)
             if not self.search_results:
                 waiting = bool(self.search_inflight & self.search_needed or self.player_due or self.player_key in self.player_inflight)
-                text = 'Try: stephen curry  |  lakers today  |  mavs vs rockets' if not self.search_query else 'Looking for matches...' if waiting else 'Keep typing a player, team or league.'
+                text = 'Try: stephen curry  |  lakers today  |  mavs vs rockets' if not self.search_query else self.spinner() + ' Looking for matches' if waiting else 'Keep typing a player, team or league.'
                 self.put(4, 2, text)
             self.put(h-4, 1, 'Type to search   Up/Down select   Enter open' if w >= 55 else 'Type   ↑↓ select   Enter open')
             self.put(h-3, 1, 'Tab sports   Ctrl-U clear   ? help   Ctrl-X quit' if w >= 55 else 'Tab sports   ^U clear   ^X quit')
@@ -1026,7 +1039,7 @@ class App:
                 attr = curses.A_REVERSE if selected else self.live_color if game.state == 'live' else 0
                 self.put(y, 2, f'{">" if selected else " "} {status}  {when}  {game.title}', attr)
             if not self.games:
-                self.put(4, 2, 'Loading schedule...' if self.loading_games else 'No upcoming or live games. Change date or search.')
+                self.put(4, 2, self.spinner() + ' Loading schedule' if self.loading_games else 'No upcoming or live games. Change date or search.')
             self.put(h-4, 1, 'Enter streams   R replays   t TV   s sport   [ ] date')
             self.put(h-3, 1, 'Esc sports   / search   l Lakers   r refresh   ? help   q quit')
         elif self.mode == 'replays':
@@ -1037,7 +1050,7 @@ class App:
                 selected = start+y-3 == self.ri
                 self.put(y, 2, f'{">" if selected else " "} [{item.source}] {item.title}', curses.A_REVERSE if selected else 0)
             if not self.replays:
-                self.put(4, 2, 'Searching replay catalogs...' if self.replay_pending else 'No replays found. Try another search or league.')
+                self.put(4, 2, self.spinner() + ' Searching replay catalogs' if self.replay_pending else 'No replays found. Try another search or league.')
             self.put(h-4, 1, 'Enter servers   s sport   / search   r refresh')
             self.put(h-3, 1, 'R live games   ? help   q quit')
         elif self.mode == 'channels':
@@ -1051,7 +1064,7 @@ class App:
                 self.put(y, 2, f'{">" if selected else " "} {channel.name}  ({count} source{"s" if count != 1 else ""})',
                          curses.A_REVERSE if selected else curses.A_BOLD if channel.featured else 0)
             if not shown:
-                self.put(4, 2, 'Loading channels...' if self.channels_loading else 'No channels match. Press / to change the filter.')
+                self.put(4, 2, self.spinner() + ' Loading channels' if self.channels_loading else 'No channels match. Press / to change the filter.')
             self.put(h-4, 1, 'Enter sources   / filter   r refresh')
             self.put(h-3, 1, 't or Esc back   ? help   q quit')
         elif self.mode == 'replay_sources':
@@ -1115,7 +1128,7 @@ class App:
                     if compact and view.quality != '-': detail = view.quality + ' | ' + detail
                     self.put(y+1, 4, detail, attr if selected else curses.A_DIM)
             if not fs:
-                self.put(6, 2, 'Looking for streams...' if self.feed_pending else 'No available feeds. Refresh near game time or change the filter.')
+                self.put(6, 2, self.spinner() + ' Looking for streams' if self.feed_pending else 'No available feeds. Refresh near game time or change the filter.')
             if w < 60:
                 self.put(h-4, 1, 'Enter play  t test  g rank  Esc')
                 # Only live games have home and away broadcasts to choose between.
