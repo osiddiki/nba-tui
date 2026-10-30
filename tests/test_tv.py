@@ -39,6 +39,19 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(found[1][1].label, '720p (may be US-only)')
         self.assertEqual(found[1][1].headers, ())
 
+    def test_other_playlists_keep_their_name_and_skip_dead_or_local_streams(self):
+        text = '''#EXTM3U
+#EXTINF:-1 tvg-status="stable",MS NOW
+http://95.143.42.59:1234/stream/msnow/master.m3u8
+#EXTINF:-1 tvg-status="not-working",C-SPAN
+http://95.143.42.59:1234/stream/cspan/master.m3u8
+#EXTINF:-1,Router
+http://192.168.1.1:8080/live.m3u8
+'''
+        found = tv.iptv_channels(text, 'Aria')
+        self.assertEqual([(name, source.provider, source.url) for name, source in found],
+                         [('MS NOW', 'Aria', 'http://95.143.42.59:1234/stream/msnow/master.m3u8')])
+
     def test_daddylive_list_resolves_stream_pages_on_selection(self):
         found = tv.daddylive_channels(DADDY, 'https://thedaddy.example/24-7-channels.php')
         self.assertEqual([name for name, _ in found], ['CNN USA', 'MSNBC', "6'eren Denmark"])

@@ -14,13 +14,15 @@ MONSTER = 'https://nbamonster.com'
 SF_ROOT = 'https://streamfree.top'
 
 
-def public_url(url):
+def public_url(url, any_port=False):
+    """A public http(s) URL. Pages must use the standard ports; media streams on a public
+    host may use any port (free playlists often serve on 8080 and the like)."""
     try:
         u = urllib.parse.urlsplit(url)
         if u.scheme not in ('http','https') or not u.hostname or u.username or u.password: return False
         name = u.hostname.lower().rstrip('.')
         if name in ('localhost','metadata.google.internal') or name.endswith(('.localhost','.local','.internal')): return False
-        if u.port is not None and u.port not in (80, 443): return False
+        if not any_port and u.port is not None and u.port not in (80, 443): return False
         try:
             if not ipaddress.ip_address(name).is_global: return False
         except ValueError:

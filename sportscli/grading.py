@@ -55,7 +55,7 @@ def inspect_stream(url, headers=None, *, quick=False):
 
     started = time.monotonic()
     current, resolution, probe_data = url, None, None
-    ffprobe = None if quick else shutil.which('ffprobe')
+    ffprobe = shutil.which('ffprobe')
     timeout = 4 if quick else 10
     for _ in range(3):
         with open_url(current, timeout) as res:
@@ -93,7 +93,8 @@ def inspect_stream(url, headers=None, *, quick=False):
             # Probe only a bounded portion of the chosen segment. ffprobe cannot
             # follow URLs embedded in an untrusted playlist from this input.
             if ffprobe:
-                probe_data = sample + res.read(2 * 1024 * 1024 - len(sample))
+                # A quick check reads less; the first keyframe's header is enough for the height.
+                probe_data = sample + res.read((512 if quick else 2048) * 1024 - len(sample))
         break
     else:
         raise ValueError('Too many nested playlists')

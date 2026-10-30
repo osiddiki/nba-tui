@@ -337,6 +337,18 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(app.visible_feeds(), [three, one, two])
         self.assertIs(app.visible_feeds()[app.fi], three)
 
+    def test_checked_sources_order_by_measured_resolution(self):
+        app = nba.App(None, {})
+        self.addCleanup(app.close)
+        app.feed_generation = 1
+        sd, unknown, hd = feeds = [nba.Feed('Source', name, url='https://example.com/' + name, kind='direct')
+                                   for name in ('sd', 'unknown', 'hd')]
+        app.feeds = feeds
+        for feed in feeds: app.auto_checks[id(feed)] = 'checking'
+        for feed, height in ((sd, 432), (unknown, None), (hd, 720)): app.auto_queue.put((1, feed, 'OK', height))
+        app.poll_auto_checks()
+        self.assertEqual(app.visible_feeds(), [hd, sd, unknown])
+
     def test_mpv_headers_are_arguments_not_shell_and_reject_injection(self):
         command = nba.mpv_command('https://example.com/a.m3u8',
                                   {'Referer':'https://example.com/', 'Bad\nHeader':'x', 'X-Unsafe':'a\nb'})

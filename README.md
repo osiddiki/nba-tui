@@ -96,7 +96,7 @@ If resolution, a test, or mpv playback fails, the source is hidden for the curre
 
 ### Live TV
 
-Press `t` on the sports or schedule screen, or start with `./sports-cli --tv`, for live TV channels. `./sports-cli --list --tv` prints the main channels and their sources. News and the major networks are listed first, followed by about 2,000 other channels. Press `/` to filter by name, then Enter to see the channel's sources. They come from two places: free direct streams listed by [iptv-org](https://github.com/iptv-org/iptv), and DaddyLive's 24/7 channel pages, which are resolved through the local relay when selected. Some free streams work only from the US. Channels play like games, including the backup source; AI ad detection stays off for TV.
+Press `t` on the sports or schedule screen, or start with `./sports-cli --tv`, for live TV channels. `./sports-cli --list --tv` prints the main channels and their sources. News and the major networks are listed first, followed by about 2,000 other channels. Press `/` to filter by name, then Enter to see the channel's sources. They come from free playlists listed by FMHY ([iptv-org](https://github.com/iptv-org/iptv), [doms9](https://github.com/doms9/iptv) and [TheAriaTV](https://github.com/aria-tv/aria)) and from DaddyLive's 24/7 channel pages, which are resolved through the local relay when selected. Opening a channel checks its sources in the background; the QUALITY column then shows the measured resolution, and the highest-resolution working source moves to the top. Some free streams work only from the US. Channels play like games, including the backup source; AI ad detection stays off for TV.
 
 ### Backup sources
 

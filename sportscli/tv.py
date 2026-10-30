@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 from . import providers
 
 IPTV_US = 'https://iptv-org.github.io/iptv/countries/us.m3u'
+# Free playlists listed by FMHY (rentry.co/IPTV-Playlists) that carry US news and network channels.
+PLAYLISTS = [('iptv-org', IPTV_US),
+             ('doms9', 'https://raw.githubusercontent.com/doms9/iptv/default/M3U8/TV.m3u8'),
+             ('Aria', 'https://raw.githubusercontent.com/aria-tv/aria/main/aria%2B/united_states.m3u')]
 DADDYLIVE = 'https://dlive.sx/24-7-channels.php'
 MAX_PLAYLIST = 4_000_000
 ADULT = re.compile(r'18\+|\bxxx\b|\badult\b|\bporn', re.I)
@@ -65,7 +69,7 @@ def key(name):
     return ' '.join(re.sub(r'[^a-z0-9/+&-]+', ' ', name).split())
 
 
-def iptv_channels(text):
+def iptv_channels(text, provider='iptv-org'):
     """Parse an M3U playlist into direct sources, keeping per-stream referer and user agent."""
     out, info, options = [], None, {}
     for line in text.splitlines():
@@ -77,7 +81,9 @@ def iptv_channels(text):
             options[name.strip().lower()] = value.strip()
         elif line and not line.startswith('#') and info:
             title = info.rsplit(',', 1)[-1].strip()
-            if title and not ADULT.search(title) and providers.public_url(line) and urllib.parse.urlsplit(line).scheme in ('http', 'https'):
+            # Aria marks streams its own checks found dead.
+            dead = 'tvg-status="not-working"' in info
+            if title and not dead and not ADULT.search(title) and providers.public_url(line, any_port=True):
                 headers = []
                 if options.get('http-referrer'): headers.append(('Referer', options['http-referrer']))
                 if options.get('http-user-agent'): headers.append(('User-Agent', options['http-user-agent']))
@@ -85,7 +91,7 @@ def iptv_channels(text):
                 quality = re.search(r'\((\d{3,4}p)\)', title)
                 label = (quality.group(1) if quality else 'stream') + blocked
                 clean = re.sub(r'\s*\[[^\]]*\]|\s*\(\d{3,4}p\)', '', title).strip()
-                out.append((clean, Source('iptv-org', label, line, 'direct', tuple(headers))))
+                out.append((clean, Source(provider, label, line, 'direct', tuple(headers))))
             info, options = None, {}
     return out
 
@@ -115,13 +121,14 @@ def fetch_text(url, timeout=15):
 
 def directory():
     """Return (channels, errors); featured channels first, then everything else by name."""
-    def iptv(): return iptv_channels(fetch_text(IPTV_US))
+    def playlist(name, url): return iptv_channels(fetch_text(url), name)
     def daddy():
         page, final = providers.fetch_html(DADDYLIVE, timeout=15, limit=3_000_000)
         return daddylive_channels(page, final)
     found, errors = [], []
-    with concurrent.futures.ThreadPoolExecutor(2) as pool:
-        for name, future in (('iptv-org', pool.submit(iptv)), ('DaddyLive', pool.submit(daddy))):
+    with concurrent.futures.ThreadPoolExecutor(len(PLAYLISTS) + 1) as pool:
+        jobs = [(name, pool.submit(playlist, name, url)) for name, url in PLAYLISTS] + [('DaddyLive', pool.submit(daddy))]
+        for name, future in jobs:
             try: found.extend(future.result())
             except Exception as exc: errors.append(f'{name}: {type(exc).__name__}')  # noqa: BLE001
     return group(found), errors
@@ -140,7 +147,7 @@ def group(found):
                 if source not in merged.sources: merged.sources.append(source)
         if merged.sources: featured.append(merged)
     for channel in featured:
-        # Direct streams start faster; player pages are backups.
+        # Direct streams start faster; player pages are backups. Checks then order by measured resolution.
         channel.sources.sort(key=lambda source: source.kind != 'direct')
     rest = sorted(by_key.values(), key=lambda channel: channel.name.casefold())
     return featured + rest

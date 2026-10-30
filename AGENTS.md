@@ -20,7 +20,7 @@ To prove a change in the real app, use the project skill `.claude/skills/verify-
 - `sportscli/players.py`: lazy player-name search and bounded roster verification; keep this separate from team search so slow rosters cannot block the UI.
 - `sportscli/progress.py`: optional Rich-backed download progress with a standard-library fallback; no model is downloaded by default.
 - `sportscli/providers.py`: bounded public-page discovery and supported embedded player resolution.
-- `sportscli/tv.py`: live TV channel directory from iptv-org's US playlist (direct streams with their required headers) and DaddyLive's 24/7 list (player pages resolved on selection), merged by channel name with news and major networks first and adult channels left out.
+- `sportscli/tv.py`: live TV channel directory from free M3U playlists (iptv-org, doms9, TheAriaTV; direct streams with their required headers, on any port of a public host) and DaddyLive's 24/7 list (player pages resolved on selection), merged by channel name with news and major networks first and adult channels left out.
 - `sportscli/replays.py`: replay catalog listings, search, and per-replay server discovery.
 - `sportscli/relay.py`: session-only local HLS relay for tokenized, image-wrapped streams, with pooled keep-alive connections and merged live sessions.
 - `sportscli/merge.py`: playlist parsing and the verified output timeline used to fail over between equivalent live sources by segment name, program date, transport-stream timestamp, or live-edge distance.
