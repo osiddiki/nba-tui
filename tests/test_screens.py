@@ -49,7 +49,7 @@ def make_app():
     record = lambda name: (lambda *args, **kwargs: app.calls.append(name))
     def refresh_games(): app.games = list(GAMES); app.all_games = list(GAMES); app.loading_games = False; app.calls.append('refresh_games')
     def refresh_replays(): app.replays = list(REPLAYS); app.replay_pending = 0; app.calls.append('refresh_replays')
-    def refresh_feeds(): app.feeds = feeds(); app.feed_pending = 0; app.calls.append('refresh_feeds')
+    def refresh_feeds(recheck=False): app.feeds = feeds(); app.feed_pending = 0; app.calls.append('refresh_feeds')
     def refresh_channels(): app.channels = list(CHANNELS); app.channels_loaded_at = time.monotonic(); app.calls.append('refresh_channels')
     def prompt(*args, **kwargs): app.calls.append('prompt'); return ''
     for name, value in {'refresh_games': refresh_games, 'refresh_replays': refresh_replays, 'refresh_feeds': refresh_feeds,

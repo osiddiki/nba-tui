@@ -26,6 +26,7 @@ To prove a change in the real app, use the project skill `.claude/skills/verify-
 - `sportscli/relay.py`: session-only local HLS relay for tokenized, image-wrapped streams, with pooled keep-alive connections and merged live sessions.
 - `sportscli/merge.py`: playlist parsing and the verified output timeline used to fail over between equivalent live sources by segment name, program date, transport-stream timestamp, or live-edge distance.
 - `sportscli/grading.py`: on-demand playlist and segment checks, local grades and ranking.
+- `sportscli/checks.py`: two-hour on-disk memory of source check results in the user cache directory, keyed by a hash so no URL or token is stored.
 - `sportscli/ad_mute.py`: optional mpv muting for complete replay playlists with explicit ad cues.
 - `sportscli/ai_ad_mute.py`, `sportscli/ai_ad_worker.py`: separately installed, optional local NBA-only frame classifier and mpv muting control. Model weights and Python packages live outside the checkout.
 - `sportscli/breaks.py`: what to show during a detected break: a break-screen OSD overlay (mpv leaves OSD out of the detector's video screenshots) or another live game in a separate, always-on-top corner mpv window resolved ahead of time.

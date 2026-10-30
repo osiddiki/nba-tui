@@ -21,7 +21,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from . import providers, relay, grading, replays, smart_search, players, ad_mute, ai_ad_mute, breaks, tv
+from . import providers, relay, grading, checks, replays, smart_search, players, ad_mute, ai_ad_mute, breaks, tv
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 
@@ -248,6 +248,11 @@ def replay_identity(index, hit):
             teams.append(matches[0][0].id if matches and matches[0][1] >= .9 else smart_search.normalize(part))
         return (hit.league, hit.date.isoformat(), *sorted(teams)), title
     return (hit.league, hit.item.url), title
+
+
+def check_age(seconds):
+    minutes = max(0, int(seconds // 60))
+    return 'now' if minutes == 0 else f'{minutes}m' if minutes < 60 else f'{minutes // 60}h'
 
 
 def describe_feed(feed, record=None, automatic=None):
@@ -827,6 +832,7 @@ class App:
         self.auto_jobs = queue.Queue(maxsize=24)
         self.auto_workers = []
         self.auto_generation = None; self.auto_started = 0; self.auto_heights = {}
+        self.check_cache = checks.CheckCache(); self.auto_checked_at = {}; self.recheck_generation = None
         self.manual_checks = set()
         self.manual_queue = queue.Queue()
         self.manual_status = {}
@@ -1140,6 +1146,8 @@ class App:
                 status = (('Opening' if self.action_current[3] == 'play' else 'Inspecting') if opening else
                           'testing' if (self.feed_generation, id(feed)) in self.manual_checks else
                           self.manual_status.get(id(feed), self.auto_checks.get(id(feed))))
+                if id(feed) in self.auto_checked_at and status == self.auto_checks.get(id(feed)) and id(feed) not in self.manual_status:
+                    status = f'{status} {check_age(time.time() - self.auto_checked_at[id(feed)])}'
                 record = dict(history.get(grading.source_key(feed), {}))
                 if id(feed) in self.auto_heights: record['height'] = self.auto_heights[id(feed)]
                 view = describe_feed(feed, record, status)
@@ -1624,6 +1632,7 @@ class App:
         self.feed_pending = self.search_preview_pending
         self.fi = 0; self.feed_selection_touched = False
         self.hidden_feeds.clear(); self.auto_checks.clear(); self.manual_status.clear(); self.auto_heights.clear()
+        self.auto_checked_at.clear()
         self.search_preview_adopt_generation = generation
         for feeds in self.feed_sections.values(): self.start_auto_checks(generation, feeds)
         self.message = f'{len(self.feeds)} choices found'
@@ -1695,9 +1704,10 @@ class App:
             self.rebuild_global_results()
         return True
 
-    def refresh_feeds(self):
+    def refresh_feeds(self, recheck=False):
         self.feed_generation += 1
         generation = self.feed_generation
+        if recheck: self.recheck_generation = generation
         if self.feed_context == 'tv':
             channel = self.current_channel
             def channel_sources():
@@ -1718,7 +1728,7 @@ class App:
             tasks = feed_tasks(self.games[self.gi], dict(self.config))
         self.feeds = []; self.errors = []; self.fi = 0
         self.hidden_feeds.clear()
-        self.auto_checks.clear(); self.auto_heights.clear()
+        self.auto_checks.clear(); self.auto_heights.clear(); self.auto_checked_at.clear()
         self.manual_status.clear()
         self.feed_sections = {}; self.feed_order = [name for name, _ in tasks]
         self.feed_pending = len(tasks); self.feed_selection_touched = False
@@ -1781,9 +1791,16 @@ class App:
             while True:
                 try: self.auto_jobs.get_nowait()
                 except queue.Empty: break
+        unchecked = []
+        for feed in feeds:
+            entry = None if generation == self.recheck_generation else self.check_cache.get(feed)
+            if entry is None: unchecked.append(feed); continue
+            self.auto_checks[id(feed)] = entry.status
+            self.auto_checked_at[id(feed)] = entry.checked_at
+            if entry.height is not None: self.auto_heights[id(feed)] = entry.height
         # Check the top few of each directory so a working source is visible before the user picks one.
         room = max(0, AUTO_CHECKS_PER_SCREEN - self.auto_started)
-        chosen = [feed for feed in feeds if feed.kind in ('sf', 'direct', 'candidate')][:min(AUTO_CHECKS_PER_DIRECTORY, room)]
+        chosen = [feed for feed in unchecked if feed.kind in ('sf', 'direct', 'candidate')][:min(AUTO_CHECKS_PER_DIRECTORY, room)]
         self.auto_started += len(chosen)
         for feed in chosen:
             self.auto_checks[id(feed)] = 'checking'
@@ -1823,9 +1840,12 @@ class App:
             except queue.Empty: break
             if generation != self.feed_generation or id(feed) not in self.auto_checks: continue
             self.auto_checks[id(feed)] = status
+            self.auto_checked_at.pop(id(feed), None)
             if measured and isinstance(measured[0], int): self.auto_heights[id(feed)] = measured[0]
+            self.check_cache.put(feed, status, measured[0] if measured else None)
             changed = True
         if changed:
+            self.check_cache.save()
             visible = self.visible_feeds()
             selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
             self.fi = (selected_index if selected_index is not None else
@@ -2254,6 +2274,8 @@ class App:
                 self.manual_status[id(feed)] = 'OK'
             if result.get('height'): record['height'] = result['height']
             save_config(self.config)
+            outcome = 'OK' if error is None else f'HTTP {error.code}' if isinstance(error, urllib.error.HTTPError) else None
+            if outcome: self.check_cache.put(feed, outcome, result.get('height')); self.check_cache.save()
             if error: self.hidden_feeds.add(id(feed))
             visible = self.visible_feeds()
             selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
@@ -2332,7 +2354,7 @@ class App:
         elif key in self.BACK_KEYS: self.go_back()
         elif key == ord('r') and self.mode in ('games', 'replays', 'channels', 'feeds'):
             {'games': self.refresh_games, 'replays': self.refresh_replays,
-             'channels': self.refresh_channels, 'feeds': self.refresh_feeds}[self.mode]()
+             'channels': self.refresh_channels, 'feeds': lambda: self.refresh_feeds(recheck=True)}[self.mode]()
         elif key == ord('f') and self.mode in ('games', 'replays', 'channels', 'feeds'): self.filter_list()
         elif self.mode == 'games' and key in (ord('['), ord(']')):
             self.day += dt.timedelta(days=-1 if key == ord('[') else 1); self.gi = 0; self.refresh_games()

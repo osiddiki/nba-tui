@@ -87,9 +87,8 @@ def iptv_channels(text, provider='iptv-org'):
                 headers = []
                 if options.get('http-referrer'): headers.append(('Referer', options['http-referrer']))
                 if options.get('http-user-agent'): headers.append(('User-Agent', options['http-user-agent']))
-                blocked = ' (may be US-only)' if 'geo-blocked' in title.casefold() else ''
-                quality = re.search(r'\((\d{3,4}p)\)', title)
-                label = (quality.group(1) if quality else 'stream') + blocked
+                # Playlists' quality labels are often wrong; checks measure the real resolution.
+                label = 'stream' + (' (may be US-only)' if 'geo-blocked' in title.casefold() else '')
                 clean = re.sub(r'\s*\[[^\]]*\]|\s*\(\d{3,4}p\)', '', title).strip()
                 out.append((clean, Source(provider, label, line, 'direct', tuple(headers))))
             info, options = None, {}

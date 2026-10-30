@@ -35,8 +35,8 @@ class ChannelTests(unittest.TestCase):
         cnn = found[0][1]
         self.assertEqual(cnn.kind, 'direct')
         self.assertEqual(dict(cnn.headers), {'Referer': 'https://player.example/', 'User-Agent': 'Agent/1'})
-        self.assertEqual(cnn.label, '720p')
-        self.assertEqual(found[1][1].label, '720p (may be US-only)')
+        self.assertEqual(cnn.label, 'stream')  # the measured height replaces the playlist's claim
+        self.assertEqual(found[1][1].label, 'stream (may be US-only)')
         self.assertEqual(found[1][1].headers, ())
 
     def test_other_playlists_keep_their_name_and_skip_dead_or_local_streams(self):
