@@ -41,12 +41,12 @@ The setup script installs a pinned copy of the [PPV HLS resolver](https://github
 
 ## First run
 
-1. Select a sport or league on the opening screen, or press `s`, `/`, or `Space` to search across sports. Use `./sports-cli --search` to open directly into search.
+1. The app opens on Home. Choose Live sports, Replays or Live TV, or press `/` to search across everything. Use `./sports-cli --search` to open directly into search.
 2. Try `stephen curry`, `warriors`, `mavs rockets`, `lakers vs blazers oct 27`, or `tamu vs alabama`. Select a player to see their team's games and replays. Team results are grouped with live broadcasts, recent replays, and upcoming games. Matching team suggestions follow below. The app checks a relevant team's upcoming schedule and, for specific NBA matchups, searches a few older replay pages in the background.
-3. Use the arrow keys and `Enter` to open a game, a home or away broadcast list, or a replay. Home and away choices appear when a directory identifies those sides; open the live game to see all sources, including unlabeled ones. Replay listings for the same game are grouped; choose a provider, then a server. In search, `Ctrl-U` clears the query, `Ctrl-R` refreshes, and `Tab` returns to sports.
-4. Select a stream and press `Enter` to play. Resolution runs in the background while you browse; going back or choosing another stream cancels the pending launch. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `f` by broadcast side, or `/` to search providers and channels. Press `r` to refresh.
-5. On macOS, press `p` to switch between mpv and IINA. On Linux, `p` switches between mpv and Celluloid. The graphical player must be installed first.
-6. To browse archives by league, select a league and press `R` in its game list. Press `R` again to return to games. Press `s` in a game, replay, or stream list to choose a different sport.
+3. Use the arrow keys and `Enter` to open a game, a home or away broadcast list, or a replay. Home and away choices appear when a directory identifies those sides; open the live game to see all sources, including unlabeled ones. Replay listings for the same game are grouped; choose a provider, then a server. In search, `Ctrl-U` clears the query, `Ctrl-R` refreshes, and `Esc` goes back.
+4. Select a stream and press `Enter` to play. Resolution runs in the background while you browse; going back or choosing another stream cancels the pending launch. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `h` by home or away broadcast, or `f` to filter sources by name. Press `x` to test a source and `r` to refresh.
+5. On macOS, switch between mpv and IINA in Settings (`,`); on Linux, between mpv and Celluloid. The graphical player must be installed first.
+6. To browse archives, press `2` (or choose Replays on Home) and pick a sport. Press `s` in a game, replay or stream list to choose a different sport.
 
 Press `?` for the in-app controls and `Ctrl-F` to return to global search from another screen. `Esc` goes back. `Ctrl-X` quits from search; `q` quits from the other lists. The schedule date is in Eastern time; game times are displayed in your machine's local timezone. Completed games are omitted from live schedules but may appear as replays.
 
@@ -58,23 +58,28 @@ When using mpv, close its window or press `q` in mpv to return to the picker. II
 
 ## Controls
 
+The app opens on **Home**: live sports, replays, live TV, search and settings. Every key means the same thing on every screen, and each screen's footer lists the keys that work there.
+
 | Key | Action |
 | --- | --- |
-| `↑` / `↓`, `Enter`, `Esc` | Move, select, or go back (`j` / `k` also move outside search) |
-| `s` / `/` / `Space` on the opening screen | Open global search |
-| `Ctrl-F`, `Tab`, `Ctrl-U`, `Ctrl-R`, `Ctrl-X` | Global search, browse sports, clear, refresh, or quit search |
-| `s` (or `S`), `[`, `]`, `/`, `l` | Choose sport, change schedule date, search, or filter for the Lakers |
-| `R` | Switch between the live schedule and replays |
-| `t` | Live TV channels such as CNN, CNBC, MS NOW and Fox News; `/` filters the list. Start there with `./sports-cli --tv` |
-| `f`, `o`, `r` | Broadcast side, provider, or refresh |
-| `t`, `g`, `i` | Test a source, rank sources by checks, or inspect its media URL |
-| `p`, `c`, `v` | Player, cache size, or mpv terminal video |
-| `b` | Turn the live backup source on or off |
-| `m` | With `--ai-ad-mute`, choose what happens during detected ads: mute only, a break screen, or another live game in a corner |
-| `u`, `a`, `d` | Paste a media URL, configure an add-on, or select a PPV resolver directory |
+| `1` `2` `3` | Live sports, replays, live TV, from anywhere |
+| `/` | Search teams, players, games, replays and TV channels |
+| `,` | Settings: player, cache, terminal video, backup source, ad breaks, add-on, PPV resolver |
+| `↑` `↓` (or `j` `k`) | Move |
+| `Enter` or `→` | Open or play |
+| `Esc`, `←` or `Backspace` | Back up one level; repeated, it reaches Home |
+| `s` | Change sport, on a schedule, a replay list or their sources |
+| `f` | Filter the current list (games, replays, channels, sources) |
+| `r` | Refresh the current list |
+| `[` `]` | Previous or next day on a schedule |
+| `x`, `i` | On sources: test the selected source, or show its media URL |
+| `o`, `h`, `g` | On sources: cycle provider, home or away feed (live games), rank by your checks |
+| `u` | On sources: play a pasted media URL |
 | `?`, `q` | Help or quit |
 
-Keys are case-sensitive except for `s` / `S`. `./sports-cli --list --league wnba` prints a plain-text schedule and the first game's streams. `./sports-cli --league ncaaf` opens college football directly; `./sports-cli --league nba --date 2026-10-31` selects a schedule date. Run `./sports-cli --help` for all league codes.
+In search, letters type into the query: `Esc` goes back, `Ctrl-U` clears and `Ctrl-X` quits. While a stream plays, keys go to mpv (Space pause, `m` mute, `q` back to the app).
+
+`./sports-cli --tv` starts on live TV, `./sports-cli --league ncaaf` opens college football directly, and `./sports-cli --league nba --date 2026-10-31` picks a schedule date. `./sports-cli --list --league wnba` prints a plain-text schedule and the first game's streams; `./sports-cli --list --tv` prints the main channels. Run `./sports-cli --help` for all league codes.
 
 ## Sources and options
 
@@ -96,13 +101,13 @@ If resolution, a test, or mpv playback fails, the source is hidden for the curre
 
 ### Live TV
 
-Press `t` on the sports or schedule screen, or start with `./sports-cli --tv`, for live TV channels. `./sports-cli --list --tv` prints the main channels and their sources. News and the major networks are listed first, followed by about 2,000 other channels. Press `/` to filter by name, then Enter to see the channel's sources. They come from free playlists listed by FMHY ([iptv-org](https://github.com/iptv-org/iptv), [doms9](https://github.com/doms9/iptv) and [TheAriaTV](https://github.com/aria-tv/aria)) and from DaddyLive's 24/7 channel pages, which are resolved through the local relay when selected. Opening a channel checks its sources in the background; the QUALITY column then shows the measured resolution, and the highest-resolution working source moves to the top. Some free streams work only from the US. Channels play like games, including the backup source; AI ad detection stays off for TV.
+Press `3` from anywhere, choose Live TV on Home, or start with `./sports-cli --tv`. `./sports-cli --list --tv` prints the main channels and their sources. News and the major networks are listed first, followed by about 2,000 other channels. Press `f` to filter by name, or find a channel from `/` search, then Enter to see its sources. They come from free playlists listed by FMHY ([iptv-org](https://github.com/iptv-org/iptv), [doms9](https://github.com/doms9/iptv) and [TheAriaTV](https://github.com/aria-tv/aria)) and from DaddyLive's 24/7 channel pages, which are resolved through the local relay when selected. Opening a channel checks its sources in the background; the QUALITY column then shows the measured resolution, and the highest-resolution working source moves to the top. Some free streams work only from the US. Channels play like games, including the backup source; AI ad detection stays off for TV.
 
 ### Backup sources
 
 When you play a live game, the app also resolves up to two other sources for the same broadcast side and serves the first one that works, together with your choice, through the local relay on `127.0.0.1`. The relay downloads each segment before handing it to the player. If your source freezes, stops listing new segments, or fails a segment, playback continues from the backup without the player seeing an error. When both sources re-host the same upstream stream, the relay resumes at the same segment or timestamp, so the switch is seamless. Independently encoded sources can show a short picture change, and if their clocks are unrelated mpv's time display jumps at the switch.
 
-The backup is used only for live HLS sources that are not encrypted or split into separate audio playlists; PPV and browser-only sources are not used as backups. Home and away feeds are never mixed, because their commentary differs. If no backup resolves within about 10 seconds, the stream plays directly as before. Press `b` in a stream list to turn this off; the setting is saved. A backup doubles playlist requests but not video downloads, which come from one source at a time.
+The backup is used only for live HLS sources that are not encrypted or split into separate audio playlists; PPV and browser-only sources are not used as backups. Home and away feeds are never mixed, because their commentary differs. If no backup resolves within about 10 seconds, the stream plays directly as before. Turn this off in Settings (`,`); the setting is saved. A backup doubles playlist requests but not video downloads, which come from one source at a time.
 
 ### Replays
 
@@ -132,14 +137,14 @@ The install downloads the original 150 MB model and conversion packages, verifie
 
 This detector samples video frames locally in mpv and sends nothing to an AI service. It was trained for NBA video and is disabled for other leagues. Try `--ai-ad-observe` first: it shows predictions without muting. In tests with real NBA broadcasts and commercials, the detector also classified some studio and bench coverage as ads. Automatic muting is experimental and may silence game coverage; use mpv's `m` key to override it; unmuting also ends the break screen and corner preview until coverage returns. The model is a quantized version of the MIT-licensed [NBA-redzone-ML model](https://huggingface.co/plt3/NBA-redzone-ML), and the project describes its original training and evaluation [here](https://github.com/plt3/NBA-redzone-ML).
 
-Press `m` on the source screen to choose what happens during a detected break. **Mute only** is the default. **Break screen** also covers the picture with the matchup until coverage returns; the detector keeps watching the game underneath. **Other game in a corner** adds a small, always-on-top mpv window with another live game from the same schedule, with its sound on, and closes it when your game returns. The other game's stream is found in the background when playback starts, so the first break may begin before it is ready. If no other game is live, you get the break screen only. Press `q` in the corner window to close it for that break.
+Choose what happens during a detected break in Settings (`,`). **Mute only** is the default. **Break screen** also covers the picture with the matchup until coverage returns; the detector keeps watching the game underneath. **Other game in a corner** adds a small, always-on-top mpv window with another live game from the same schedule, with its sound on, and closes it when your game returns. The other game's stream is found in the background when playback starts, so the first break may begin before it is ready. If no other game is live, you get the break screen only. Press `q` in the corner window to close it for that break.
 
 To collect footage for your own detector, start with `./sports-cli --record ~/ad-data/recordings`; mpv saves each stream you play there, including commercials. Recordings stay on your machine and must never be committed. For developers comparing detectors against labeled local recordings, or training a small multi-sport model, see [ad detector testing](docs/ad-detector-testing.md). An installed trained model enables AI detection for the leagues it was trained on.
 
 ### Add-ons and resolver
 
-Press `a` to configure a compatible sports Stremio add-on. For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./sports-cli --addon 'https://…/manifest.json'`.
+Set a compatible sports Stremio add-on in Settings (`,`). For example, [Sports Streams](https://sports.highfly.to/configure) offers a manifest after its one-time setup. The app queries the selected sport and generic sports catalogs for direct URLs. Pass a manifest for one run with `./sports-cli --addon 'https://…/manifest.json'`.
 
-The PPV helper runs only when needed on `127.0.0.1:38765` and is closed on exit if the app started it. To use a different checkout, press `d` or pass `--resolver-dir /path/to/ppv-hls-proxy`; run `npm install` in that checkout first. Settings are saved with owner-only permissions in `${XDG_CONFIG_HOME:-~/.config}/nba-tui/config.json`. Source-check history does not store media URLs or tokens. The app does not decrypt DRM-protected streams.
+The PPV helper runs only when needed on `127.0.0.1:38765` and is closed on exit if the app started it. To use a different checkout, set it in Settings (`,`) or pass `--resolver-dir /path/to/ppv-hls-proxy`; run `npm install` in that checkout first. Settings are saved with owner-only permissions in `${XDG_CONFIG_HOME:-~/.config}/nba-tui/config.json`. Source-check history does not store media URLs or tokens. The app does not decrypt DRM-protected streams.
 
 Streams and archives change frequently. Try another source or increase the cache with `c` if playback stalls. For development and agent setup, see [AGENTS.md](AGENTS.md).

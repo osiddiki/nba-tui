@@ -54,27 +54,26 @@ SF_ROOT = 'https://streamfree.top'
 NTV = 'https://ntv.st'
 RESOLVER = 'http://127.0.0.1:38765'
 CONFIG = pathlib.Path(os.environ.get('XDG_CONFIG_HOME', pathlib.Path.home() / '.config')) / 'nba-tui' / 'config.json'
+HOME_ITEMS = [('sports', '1', 'Live sports', "Today's games and their streams"),
+              ('replays', '2', 'Replays', 'Full games from recent days'),
+              ('tv', '3', 'Live TV', 'CNN, CNBC, MS NOW, Fox News and more'),
+              ('search', '/', 'Search', 'Teams, players, games and channels'),
+              ('settings', ',', 'Settings', 'Player, backup streams, ad breaks')]
+
 HELP_LINES = [
-    'SEARCH         Type a player, team or matchup    arrows: select    Enter: open',
-    'GLOBAL         s on sports: search    Ctrl-F: search from anywhere',
-    'NAVIGATE       Up/Down or j/k: move    Enter: select    Esc: back',
-    'SCHEDULE       s: sport    [ / ]: date    /: team search    l: Lakers',
-    'REPLAYS        R: replay archive    s: sport    /: search titles',
-    'TV             t: live TV channels (CNN, CNBC, MS NOW, Fox News...)    /: filter    --tv: start there',
-    'SOURCES        f: broadcast side    o: provider    /: search choices',
-    'CHECKS         t: test selected source    g: rank by your checks',
-    'PLAYBACK       p: player    c: cache    v: terminal video (mpv)',
-    'BACKUP         b: merge a second live source to cover drops',
-    'AD MUTE        --ad-mute: marked replays in mpv only',
-    'AI ADS         --ai-ad-mute: optional local NBA detector in mpv',
-    'AI PREVIEW     --ai-ad-observe: show predictions without muting',
-    'AD BREAKS      m: with --ai-ad-mute, mute, show a break screen, or show another live game in a corner',
-    'MORE           i: show media URL    u: play a pasted media URL',
-    'SETUP          a: sports add-on    d: local PPV resolver',
-    'REFRESH        r: reload current list    q: quit',
+    'EVERYWHERE     1 live sports   2 replays   3 live TV   / search   , settings   ? help   q quit',
+    'MOVE           Up/Down or j/k: select    Enter or Right: open    Esc, Left or Backspace: back',
+    'LISTS          f: filter this list    r: refresh    s: change sport (games and replays)',
+    'SCHEDULE       [ and ]: previous or next day',
+    'SOURCES        Enter: play    x: test    i: show media URL    o: provider    h: home or away feed',
+    '               g: rank by checks    u: play a pasted media URL',
+    'SEARCH         Type a team, player, game or channel    Up/Down: select    Esc: back    Ctrl-X: quit',
+    'SETTINGS       Player, cache, terminal video, backup source, ad breaks, add-on, PPV resolver',
+    'AD MUTE        --ad-mute: marked replays    --ai-ad-mute: local NBA detector    --ai-ad-observe: preview',
+    'START          --tv: live TV    --league nba: a schedule    --search: search',
+    'While a stream plays, keys go to mpv: Space pause, m mute, f fullscreen, q back here.',
     'Finished games and explicitly offline sources are hidden from live lists.',
     'Keep this terminal open while playing a local relay stream.',
-    'While a stream plays, keys go to mpv: Space pause, m mute, f fullscreen, q back here.',
 ]
 
 
@@ -178,12 +177,6 @@ class Game:
     home_aliases: list[str] = field(default_factory=list)
     away_aliases: list[str] = field(default_factory=list)
     state: str = 'unknown'
-
-    @property
-    def lakers_side(self):
-        if 'lakers' in self.home.lower(): return 'home'
-        if 'lakers' in self.away.lower(): return 'away'
-        return ''
 
 
 @dataclass
@@ -784,19 +777,21 @@ class App:
         self.day = default_day()
         self.league = 'nba'
         self.league_index = 0
-        self.league_return = 'games'
         self.league_cancel = None
         self.search = ''
         self.feed_search = ''
         self.replay_search = ''
         self.gi = self.fi = self.ri = 0
-        self.mode = 'leagues'
+        self.mode = 'home'
+        self.home_index = 0
+        self.section = 'sports'           # which section the sport list serves: sports or replays
+        self.settings_index = 0; self.settings_return = 'home'
         self.feed_context = 'live'
         self.feed_return = None
         self.current_replay = None
         self.channels, self.channel_errors, self.channel_filter = [], [], ''
         self.ci = 0; self.channels_loading = False; self.channels_loaded_at = 0
-        self.channel_queue = queue.Queue(); self.current_channel = None; self.tv_return = 'games'
+        self.channel_queue = queue.Queue(); self.current_channel = None
         self.current_bundle = None
         self.bundle_index = 0
         self.help_return = 'games'
@@ -815,7 +810,7 @@ class App:
         self.schedule_selected_id = None
         self.filter = 'all'
         self.provider_filter = 'all'
-        self.message = 'Choose a sport or press s to search.'
+        self.message = 'Choose what to watch, or press / to search.'
         self.errors = []
         self.feed_queue = queue.Queue()
         self.feed_jobs = queue.Queue(maxsize=16)
@@ -882,7 +877,7 @@ class App:
         return raw, chr(raw) if 32 <= raw <= 126 else None
 
     def visible_feeds(self):
-        side = self.games[self.gi].lakers_side if self.filter == 'lakers' and self.feed_context == 'live' else self.filter
+        side = self.filter
         query = self.feed_search.casefold().strip()
         feeds = [f for f in self.feeds if id(f) not in self.hidden_feeds and (self.filter == 'all' or f.side == side)
                  and (self.provider_filter == 'all' or f.source == self.provider_filter)
@@ -926,6 +921,10 @@ class App:
                     if not any(row[2] == 'player-heading' for row in rows):
                         rows.append((None, player_heading, 'player-heading'))
                     rows.append((i, player_text(hit), ''))
+                elif hit.kind == 'channel':
+                    if not any(row[2] == 'channel-heading' for row in rows):
+                        rows.append((None, 'TV CHANNELS', 'channel-heading'))
+                    rows.append((i, f'   {hit.title}', ''))
                 else:
                     rows.append((i, f'{hit.kind.upper()}  {hit.title}  ·  {LEAGUES[hit.league][0]}', ''))
             return rows
@@ -976,7 +975,18 @@ class App:
             rows.append((None, '   OTHER TEAMS', 'heading'))
             for i, hit in other:
                 rows.append((i, f'      {LEAGUES[hit.league][0]}  {hit.title}', ''))
+        channels = [(i, hit) for i, hit in enumerate(hits) if hit.kind == 'channel']
+        if channels:
+            rows.append((None, '   TV CHANNELS', 'heading'))
+            for i, hit in channels: rows.append((i, f'      {hit.title}', ''))
         return rows
+
+    def footer(self, actions):
+        """This screen's actions, then the keys that work on every screen."""
+        h, w = self.scr.getmaxyx()
+        self.put(h-4, 1, actions)
+        self.put(h-3, 1, '1 sports   2 replays   3 TV   / search   , settings   ? help   q quit' if w >= 72
+                 else '1 2 3 sections   / search   , settings   q quit')
 
     def busy(self):
         """Whether background work the user is waiting on is still running."""
@@ -992,7 +1002,7 @@ class App:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         self.put(0, 1, 'SPORTS CLI', self.accent_color)
-        heading = {'search':'Find a game', 'leagues':'Choose a sport or league', 'games':'Games', 'replays':'Replays', 'replay_sources':'Replay sources', 'channels':'Live TV', 'feeds':'Broadcasts', 'help':'Help'}
+        heading = {'home':'Home', 'settings':'Settings', 'search':'Search', 'leagues':'Live sports: choose a sport' if self.section == 'sports' else 'Replays: choose a sport', 'games':'Games', 'replays':'Replays', 'replay_sources':'Replay sources', 'channels':'Live TV', 'feeds':'Broadcasts', 'help':'Help'}
         title = heading.get(self.mode, '')
         self.put(1, 1, title, curses.A_BOLD)
         if self.busy(): self.put(1, len(title) + 2, self.spinner(), self.accent_color)
@@ -1014,19 +1024,30 @@ class App:
             for y, (index, text, style) in enumerate(lines[start:start+capacity], 3):
                 selected = index is not None and index == self.search_position
                 attr = (curses.A_REVERSE if selected else self.live_color if style == 'live' else
-                        curses.A_BOLD if style == 'team' else curses.A_DIM if style in ('heading', 'player-heading', 'empty') else 0)
+                        curses.A_BOLD if style == 'team' else curses.A_DIM if style in ('heading', 'player-heading', 'channel-heading', 'empty') else 0)
                 self.put(y, 2, f'{">" if selected else " "} {text}', attr)
             if not self.search_results:
                 waiting = bool(self.search_inflight & self.search_needed or self.player_due or self.player_key in self.player_inflight)
                 text = 'Try: stephen curry  |  lakers today  |  mavs vs rockets' if not self.search_query else self.spinner() + ' Looking for matches' if waiting else 'Keep typing a player, team or league.'
                 self.put(4, 2, text)
             self.put(h-4, 1, 'Type to search   Up/Down select   Enter open' if w >= 55 else 'Type   ↑↓ select   Enter open')
-            self.put(h-3, 1, 'Tab sports   Ctrl-U clear   ? help   Ctrl-X quit' if w >= 55 else 'Tab sports   ^U clear   ^X quit')
+            self.put(h-3, 1, 'Esc back   Ctrl-U clear   Ctrl-X quit')
         elif self.mode == 'help':
             rows = max(1, h-6)
             for y, line in enumerate(HELP_LINES[self.help_scroll:self.help_scroll+rows], 3):
                 self.put(y, 2, line)
-            self.put(h-3, 1, 'j/k scroll   ? or Esc back   q quit')
+            self.put(h-3, 1, 'j/k scroll   Esc back   q quit')
+        elif self.mode == 'home':
+            for y, (_, key, label, detail) in enumerate(HOME_ITEMS, 3):
+                selected = y-3 == self.home_index
+                line = f'{">" if selected else " "} {key}  {label:<12}  {detail}'
+                self.put(y, 2, line, curses.A_REVERSE if selected else 0)
+            self.footer('Enter open')
+        elif self.mode == 'settings':
+            for y, (label, value, _) in enumerate(self.settings_rows(), 3):
+                selected = y-3 == self.settings_index
+                self.put(y, 2, f'{">" if selected else " "} {label:<32} {value}', curses.A_REVERSE if selected else 0)
+            self.footer('Enter change   Esc back')
         elif self.mode == 'leagues':
             keys = list(LEAGUES)
             rows = max(1, h-6)
@@ -1034,8 +1055,7 @@ class App:
             for y, key in enumerate(keys[start:start+rows], 3):
                 selected = start+y-3 == self.league_index
                 self.put(y, 2, f'{">" if selected else " "} {LEAGUES[key][0]}', curses.A_REVERSE if selected else 0)
-            self.put(h-4, 1, 'Enter sport   t live TV (CNN, CNBC, Fox News...)' if w >= 52 else 'Enter sport   t live TV')
-            self.put(h-3, 1, 's or / search   Space search   ? help   q quit' if w >= 48 else 's search   q quit')
+            self.footer('Enter choose   Esc back')
         elif self.mode == 'games':
             self.put(2, 1, f'{LEAGUES[self.league][0]}  |  {self.day:%a %b %d} (ET date)  |  search: {self.search or "all"}')
             rows = max(1, h-7)
@@ -1048,8 +1068,7 @@ class App:
                 self.put(y, 2, f'{">" if selected else " "} {status}  {when}  {game.title}', attr)
             if not self.games:
                 self.put(4, 2, self.spinner() + ' Loading schedule' if self.loading_games else 'No upcoming or live games. Change date or search.')
-            self.put(h-4, 1, 'Enter streams   R replays   t TV   s sport   [ ] date')
-            self.put(h-3, 1, 'Esc sports   / search   ' + ('l Lakers   ' if self.league == 'nba' else '') + 'r refresh   ? help   q quit')
+            self.footer('Enter streams   s sport   [ ] date   f filter   r refresh   Esc back')
         elif self.mode == 'replays':
             self.put(2, 1, f'{LEAGUES[self.league][0]}  |  recent replays  |  search: {self.replay_search or "all"}')
             rows = max(1, h-7)
@@ -1059,8 +1078,7 @@ class App:
                 self.put(y, 2, f'{">" if selected else " "} [{item.source}] {item.title}', curses.A_REVERSE if selected else 0)
             if not self.replays:
                 self.put(4, 2, self.spinner() + ' Searching replay catalogs' if self.replay_pending else 'No replays found. Try another search or league.')
-            self.put(h-4, 1, 'Enter servers   s sport   / search   r refresh')
-            self.put(h-3, 1, 'R live games   ? help   q quit')
+            self.footer('Enter servers   s sport   f search titles   r refresh   Esc back')
         elif self.mode == 'channels':
             shown = self.visible_channels()
             self.put(2, 1, f'{len(shown)} channels  |  filter: {self.channel_filter or "all"}')
@@ -1073,8 +1091,7 @@ class App:
                          curses.A_REVERSE if selected else curses.A_BOLD if channel.featured else 0)
             if not shown:
                 self.put(4, 2, self.spinner() + ' Loading channels' if self.channels_loading else 'No channels match. Press / to change the filter.')
-            self.put(h-4, 1, 'Enter sources   / filter   r refresh')
-            self.put(h-3, 1, 't or Esc back   ? help   q quit')
+            self.footer('Enter sources   f filter   r refresh   Esc back')
         elif self.mode == 'replay_sources':
             self.put(2, 1, self.current_bundle.title)
             rows = max(1, h-7)
@@ -1082,7 +1099,7 @@ class App:
             for y, item in enumerate(self.current_bundle.sources[start:start+rows], 3):
                 selected = start+y-3 == self.bundle_index
                 self.put(y, 2, f'{">" if selected else " "} {item.source}', curses.A_REVERSE if selected else 0)
-            self.put(h-3, 1, 'Enter servers   Esc back   Ctrl-F search   ? help   q quit' if w >= 60 else 'Enter servers   Esc back   q quit')
+            self.footer('Enter servers   Esc back')
         else:
             if self.feed_context == 'replay':
                 self.put(2, 1, self.current_replay.title)
@@ -1139,13 +1156,14 @@ class App:
                     self.put(y+1, 4, detail, attr if selected else curses.A_DIM)
             if not fs:
                 self.put(6, 2, self.spinner() + ' Looking for streams' if self.feed_pending else 'No available feeds. Refresh near game time or change the filter.')
+            side = 'h side   ' if self.feed_context == 'live' else ''
+            sport = 's sport   ' if self.feed_context != 'tv' else ''
             if w < 60:
-                self.put(h-4, 1, 'Enter play  t test  g rank  Esc')
+                self.put(h-4, 1, 'Enter play  x test  ' + side.replace('   ', '  ') + 'Esc')
                 # Only live games have home and away broadcasts to choose between.
-                self.put(h-3, 1, '/ find  o source  ' + ('f side  ' if self.feed_context == 'live' else '') + '? help q')
+                self.put(h-3, 1, 'f filter  o source  ? help  q quit')
             else:
-                self.put(h-4, 1, 'Enter play   t test   g rank   / search   Esc back')
-                self.put(h-3, 1, 'o source   ' + ('f side   ' if self.feed_context == 'live' else '') + 'p player   r refresh   ? help   q quit')
+                self.footer('Enter play   x test   ' + side + 'o source   f filter   g rank   ' + sport + 'r refresh   Esc back')
         self.put(h-1, 1, self.message, curses.A_DIM)
         self.scr.refresh()
 
@@ -1232,6 +1250,8 @@ class App:
         self.gi = min(self.gi, max(0, len(self.games)-1))
 
     def update_global_search(self):
+        # Search covers live TV too; load the channel list once, in the background.
+        if not self.channels and not self.channels_loading: self.refresh_channels()
         if self.search_index is None:
             self.search_index = smart_search.default_index()
         if self.player_directory is None:
@@ -1366,6 +1386,14 @@ class App:
                       (hit.item.league, hit.item.id) != (primary.league, primary.id))
         return result
 
+    def channel_hits(self, limit=6):
+        """Live TV channels whose names match the query, main news and networks first."""
+        query = self.search_query.strip()
+        if len(query) < 2: return []
+        matches = [channel for channel in self.channels if tv.matches(channel, query)]
+        matches.sort(key=lambda channel: not channel.featured)
+        return [smart_search.Hit('channel', '', channel.name, channel) for channel in matches[:limit]]
+
     def rebuild_global_results(self):
         selected = (self.search_results[self.search_position].key if self.search_touched
                     and self.search_position < len(self.search_results) else None)
@@ -1391,6 +1419,10 @@ class App:
             self.search_results = player_hits + [hit for hit in ranked if hit.kind == 'team'][:3]
         else:
             self.search_results = grouped + player_hits
+        channels = self.channel_hits()
+        named = channels and tv.key(channels[0].title).startswith(tv.key(self.search_query))
+        # A query that names a channel (cnbc, fox news) leads with channels unless it clearly names a team.
+        self.search_results = channels + self.search_results if named and not strong_team else self.search_results + channels
         keys = [item.key for item in self.search_results]
         if selected in keys:
             self.search_position = keys.index(selected)
@@ -1555,6 +1587,10 @@ class App:
             self.search_query = hit.item.display
             self.update_global_search()
             return
+        if hit.kind == 'channel':
+            self.current_channel = hit.item; self.search_return = None
+            self.open_feeds('tv', 'search')
+            return
         if hit.kind == 'bundle':
             self.current_bundle = hit.item; self.bundle_index = 0; self.mode = 'replay_sources'
             self.message = 'Choose a replay source.'
@@ -1608,12 +1644,12 @@ class App:
 
     def poll_replays(self):
         active = (self.mode == 'replays' or (self.mode == 'feeds' and self.feed_context == 'replay')
-                  or (self.mode == 'leagues' and self.league_return == 'replays')
+                  or (self.mode == 'leagues' and self.section == 'replays')
                   or (self.mode == 'search' and (self.search_return == 'replays'
                       or (self.search_return == 'feeds' and self.feed_context == 'replay')))
                   or (self.mode == 'help' and (self.help_return == 'replays'
                       or (self.help_return == 'feeds' and self.feed_context == 'replay')
-                      or (self.help_return == 'leagues' and self.league_return == 'replays'))))
+                      or (self.help_return == 'leagues' and self.section == 'replays'))))
         changed = False
         while True:
             try: generation, name, items, error = self.replay_queue.get_nowait()
@@ -1635,13 +1671,6 @@ class App:
     def visible_channels(self):
         return [channel for channel in self.channels if tv.matches(channel, self.channel_filter)]
 
-    def open_channels(self):
-        self.tv_return = self.mode if self.mode in ('leagues', 'games') else 'games'
-        self.mode = 'channels'; self.ci = 0
-        # Channel lists change slowly; reuse one for ten minutes.
-        if not self.channels or time.monotonic() - self.channels_loaded_at > 600: self.refresh_channels()
-        else: self.message = f'{len(self.channels)} channels.'
-
     def refresh_channels(self):
         if self.channels_loading: return
         self.channels_loading = True; self.message = 'Loading live TV channels...'
@@ -1660,6 +1689,8 @@ class App:
         self.ci = min(self.ci, max(0, len(self.visible_channels())-1))
         if self.mode == 'channels':
             self.message = f'{len(self.channels)} channels' + (' | ' + ', '.join(errors) if errors else '')
+        elif self.mode == 'search' and self.search_plan is not None:
+            self.rebuild_global_results()
         return True
 
     def refresh_feeds(self):
@@ -2273,224 +2304,250 @@ class App:
             elif status: self.message = f'Celluloid exited with status {status}.'
         self.gui_players = running
 
+    # Keys that mean the same thing on every screen except search, where they type.
+    SECTIONS = {ord('1'): 'sports', ord('2'): 'replays', ord('3'): 'tv'}
+    BACK_KEYS = (27, curses.KEY_BACKSPACE, 127, 8, curses.KEY_LEFT)
+    OPEN_KEYS = (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT)
+
     def handle_key(self, key, typed):
         """Apply one key press to the current screen; return False to quit."""
-        if self.mode == 'search':
-            if key in (17, 24): return False  # Ctrl-Q or Ctrl-X
-            if key == ord('?'):
-                self.help_return = 'search'; self.help_scroll = 0; self.mode = 'help'
-                self.message = 'Controls and setup.'
-            elif key in (curses.KEY_UP, 16):
-                self.search_position = max(0, self.search_position-1); self.search_touched = True
-            elif key in (curses.KEY_DOWN, 14):
-                self.search_position = min(max(0, len(self.search_results)-1), self.search_position+1); self.search_touched = True
-            elif key in (10, 13, curses.KEY_ENTER):
-                self.open_global_result()
-            elif key in (9, 27):
-                if key == 27 and self.search_return:
-                    self.mode = self.search_return; self.search_return = None; self.message = 'Returned to list.'
-                else:
-                    self.league_index = list(LEAGUES).index(self.league)
-                    self.league_cancel = 'search'; self.league_return = 'games'
-                    self.mode = 'leagues'; self.message = 'Choose a sport or league.'
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self.search_query = self.search_query[:-1]; self.update_global_search()
-            elif key == 21:  # Ctrl-U
-                self.search_query = ''; self.update_global_search()
-            elif key == 18:  # Ctrl-R
-                for work in self.search_needed: self.search_cache.pop(work, None)
-                self.player_cache.pop(self.player_key, None)
-                if self.player_directory: self.player_directory.clear()
-                self.player_due = time.monotonic() if self.player_key else None
-                self.search_due = time.monotonic(); self.rebuild_global_results()
-            elif typed:
-                self.search_query += typed; self.update_global_search()
-            return True
-        if key == 6:  # Ctrl-F searches from any view.
-            self.search_return = self.mode; self.mode = 'search'; self.update_global_search()
-            return True
-        if self.mode == 'leagues' and key in (ord('s'), ord('S'), ord('/'), ord(' ')):
-            self.search_return = 'leagues'; self.mode = 'search'; self.update_global_search()
-            return True
-        if key in (ord('q'),): return False
+        if self.mode == 'search': return self.search_key(key, typed)
+        if key == ord('q'): return False
         if self.mode == 'help':
-            if key in (ord('?'), 27, curses.KEY_BACKSPACE, 127, ord('h')):
-                self.mode = self.help_return; self.message = 'Returned to list.'
+            if key in (ord('?'), *self.BACK_KEYS): self.mode = self.help_return; self.message = 'Returned to list.'
             elif key in (curses.KEY_UP, ord('k')): self.help_scroll = max(0, self.help_scroll-1)
             elif key in (curses.KEY_DOWN, ord('j')): self.help_scroll = min(len(HELP_LINES)-1, self.help_scroll+1)
             return True
         if key == ord('?'):
-            self.help_return = self.mode; self.help_scroll = 0; self.mode = 'help'
-            self.message = 'Controls and setup.'
-            return True
-        if key in (curses.KEY_UP, ord('k')):
-            if self.mode == 'leagues': self.league_index = max(0, self.league_index-1)
-            elif self.mode == 'games': self.gi = max(0, self.gi-1)
-            elif self.mode == 'replays': self.ri = max(0, self.ri-1); self.replay_selection_touched = True
-            elif self.mode == 'channels': self.ci = max(0, self.ci-1)
-            elif self.mode == 'replay_sources': self.bundle_index = max(0, self.bundle_index-1)
-            else: self.fi = max(0, self.fi-1); self.feed_selection_touched = True
-        elif key in (curses.KEY_DOWN, ord('j')):
-            if self.mode == 'leagues': self.league_index = min(len(LEAGUES)-1, self.league_index+1)
-            elif self.mode == 'games': self.gi = min(max(0,len(self.games)-1), self.gi+1)
-            elif self.mode == 'replays': self.ri = min(max(0,len(self.replays)-1), self.ri+1); self.replay_selection_touched = True
-            elif self.mode == 'channels': self.ci = min(max(0,len(self.visible_channels())-1), self.ci+1)
-            elif self.mode == 'replay_sources': self.bundle_index = min(len(self.current_bundle.sources)-1, self.bundle_index+1)
-            else: self.fi = min(max(0,len(self.visible_feeds())-1), self.fi+1); self.feed_selection_touched = True
-        elif key in (10,13,curses.KEY_ENTER):
-            if self.mode == 'leagues':
-                self.league = list(LEAGUES)[self.league_index]
-                if self.league_cancel == 'feeds':
-                    self.feed_generation += 1; self.feed_pending = 0
-                self.search = ''; self.gi = 0; self.mode = self.league_return
-                if self.mode == 'replays': self.replay_search = ''; self.refresh_replays()
-                else: self.refresh_games()
-            elif self.mode == 'games' and self.games:
-                self.feed_return = None; self.feed_context = 'live'; self.mode = 'feeds'; self.filter = 'all'
-                self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
-            elif self.mode == 'replays' and self.replays:
-                self.current_replay = self.replays[self.ri]; self.replay_selection_touched = True
-                self.feed_return = None; self.feed_context = 'replay'; self.mode = 'feeds'; self.filter = 'all'
-                self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
-            elif self.mode == 'channels' and self.visible_channels():
-                self.current_channel = self.visible_channels()[self.ci]
-                self.feed_return = 'channels'; self.feed_context = 'tv'; self.mode = 'feeds'; self.filter = 'all'
-                self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
-            elif self.mode == 'replay_sources' and self.current_bundle.sources:
-                self.current_replay = self.current_bundle.sources[self.bundle_index]
-                self.league = self.current_bundle.league
-                self.feed_return = 'replay_sources'; self.feed_context = 'replay'; self.mode = 'feeds'
-                self.filter = 'all'; self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
-            elif self.mode == 'feeds' and self.visible_feeds():
-                self.feed_selection_touched = True; self.begin_feed_action(self.visible_feeds()[self.fi], 'play')
-        elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'feeds':
-            self.feed_generation += 1; self.feed_pending = 0
-            if self.feed_return == 'channels':
-                self.mode = 'channels'; self.feed_return = None; self.feed_generation += 1
-                self.message = 'Select a channel.'
-            elif self.feed_return in ('search', 'replay_sources'):
-                self.mode = self.feed_return; self.feed_return = None
-                if self.mode == 'search': self.rebuild_global_results()
-                else: self.message = 'Choose a replay source.'
-            else:
-                self.mode = {'replay': 'replays', 'tv': 'channels'}.get(self.feed_context, 'games')
-                self.message = {'replays': 'Select a replay.', 'channels': 'Select a channel.'}.get(self.mode, 'Select a game.')
-        elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'leagues':
-            if self.league_cancel is None:
-                self.message = 'Choose a sport or press q to quit.'
-            else:
-                # A cancelled sport picker returns once; a later Esc must not reopen a screen already left.
-                self.mode, self.league_cancel = self.league_cancel, None; self.message = 'Returned to list.'
-        elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'games':
-            # Back to the opening sports list, the screen the schedule was chosen from.
-            self.league_index = list(LEAGUES).index(self.league)
-            self.league_cancel = None; self.league_return = 'games'
-            self.mode = 'leagues'; self.message = 'Choose a sport or league.'
-        elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'replay_sources':
-            self.mode = 'search'; self.rebuild_global_results()
-        elif key in (27, curses.KEY_BACKSPACE, 127, ord('h'), ord('R')) and self.mode == 'replays':
-            self.replay_generation += 1; self.replay_pending = 0
-            self.mode = 'games'; self.refresh_games()
-        elif self.mode in ('games', 'replays', 'replay_sources', 'channels', 'feeds') and key in (ord('s'), ord('S')):
-            self.league_index = list(LEAGUES).index(self.league)
-            self.league_cancel = self.mode
-            self.league_return = 'replays' if (self.mode in ('replays', 'replay_sources') or
-                (self.mode == 'feeds' and self.feed_context == 'replay')) else 'games'
-            self.mode = 'leagues'; self.message = 'Choose a sport or league.'
-        elif self.mode in ('leagues', 'games') and key in (ord('t'), ord('T')):
-            self.open_channels()
-        elif self.mode == 'channels' and key in (27, curses.KEY_BACKSPACE, 127, ord('h'), ord('t'), ord('T')):
-            self.mode = self.tv_return; self.message = 'Returned to list.'
-        elif self.mode == 'channels' and key == ord('/'):
-            self.channel_filter = self.prompt('Filter channels (blank shows all):', self.channel_filter).strip()
-            self.ci = 0; self.message = f'{len(self.visible_channels())} channels shown.'
-        elif self.mode == 'channels' and key == ord('r'):
-            self.refresh_channels()
-        elif self.mode == 'games' and key == ord('R'):
-            self.mode = 'replays'; self.replay_search = ''; self.refresh_replays()
-        elif self.mode in ('games', 'feeds', 'replays') and key == ord('r'):
-            if self.mode == 'games': self.refresh_games()
-            elif self.mode == 'replays': self.refresh_replays()
-            else: self.refresh_feeds()
+            self.help_return = self.mode; self.help_scroll = 0; self.mode = 'help'; self.message = 'Controls and setup.'
+        elif key in self.SECTIONS: self.open_section(self.SECTIONS[key])
+        elif key == ord('/'): self.open_search()
+        elif key == ord(','): self.open_settings()
+        elif key == ord('s') and (self.mode in ('games', 'replays') or self.mode == 'feeds' and self.feed_context != 'tv'): self.pick_sport()
+        elif key in (curses.KEY_UP, ord('k')): self.move(-1)
+        elif key in (curses.KEY_DOWN, ord('j')): self.move(1)
+        elif key in self.OPEN_KEYS: self.open_selected()
+        elif key in self.BACK_KEYS: self.go_back()
+        elif key == ord('r') and self.mode in ('games', 'replays', 'channels', 'feeds'):
+            {'games': self.refresh_games, 'replays': self.refresh_replays,
+             'channels': self.refresh_channels, 'feeds': self.refresh_feeds}[self.mode]()
+        elif key == ord('f') and self.mode in ('games', 'replays', 'channels', 'feeds'): self.filter_list()
         elif self.mode == 'games' and key in (ord('['), ord(']')):
             self.day += dt.timedelta(days=-1 if key == ord('[') else 1); self.gi = 0; self.refresh_games()
-        elif self.mode in ('games', 'replays') and key == ord('/'):
-            self.search_return = self.mode; self.mode = 'search'; self.search_query = ''; self.update_global_search()
-        elif self.mode == 'games' and key == ord('l') and self.league == 'nba':
-            self.search = '' if self.search.casefold() == 'lakers' else 'Lakers'
+        elif self.mode == 'feeds': self.feed_key(key)
+        return True
+
+    def search_key(self, key, typed):
+        if key in (17, 24): return False  # Ctrl-Q or Ctrl-X
+        if key in (curses.KEY_UP, 16):
+            self.search_position = max(0, self.search_position-1); self.search_touched = True
+        elif key in (curses.KEY_DOWN, 14):
+            self.search_position = min(max(0, len(self.search_results)-1), self.search_position+1); self.search_touched = True
+        elif key in (10, 13, curses.KEY_ENTER):
+            self.open_global_result()
+        elif key == 27:
+            self.mode = self.search_return or 'home'; self.search_return = None; self.message = 'Returned to list.'
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            self.search_query = self.search_query[:-1]; self.update_global_search()
+        elif key == 21:  # Ctrl-U
+            self.search_query = ''; self.update_global_search()
+        elif key == 18:  # Ctrl-R
+            for work in self.search_needed: self.search_cache.pop(work, None)
+            self.player_cache.pop(self.player_key, None)
+            if self.player_directory: self.player_directory.clear()
+            self.player_due = time.monotonic() if self.player_key else None
+            self.search_due = time.monotonic(); self.rebuild_global_results()
+        elif typed:
+            self.search_query += typed; self.update_global_search()
+        return True
+
+    def leave_feeds(self):
+        if self.mode == 'feeds': self.feed_generation += 1; self.feed_pending = 0
+
+    def open_section(self, section):
+        """Home's three sections, reachable from every screen with 1, 2 and 3."""
+        self.leave_feeds()
+        if section == 'tv':
+            self.mode = 'channels'; self.ci = min(self.ci, max(0, len(self.visible_channels())-1))
+            # Channel lists change slowly; reuse one for ten minutes.
+            if not self.channels or time.monotonic() - self.channels_loaded_at > 600: self.refresh_channels()
+            else: self.message = f'{len(self.channels)} channels.'
+            return
+        self.section = section; self.league_cancel = None
+        self.league_index = list(LEAGUES).index(self.league)
+        self.mode = 'leagues'; self.message = 'Choose a sport for live games.' if section == 'sports' else 'Choose a sport for replays.'
+
+    def open_search(self):
+        self.leave_feeds()
+        self.search_return = self.mode; self.mode = 'search'; self.update_global_search()
+
+    def open_settings(self):
+        if self.mode == 'settings': return
+        self.settings_return = self.mode; self.mode = 'settings'; self.message = 'Enter changes the selected setting.'
+
+    def pick_sport(self):
+        """Change sport without leaving the current section; Esc returns to where it opened."""
+        self.league_cancel = self.mode
+        self.section = 'replays' if self.mode == 'replays' or self.feed_context == 'replay' else 'sports'
+        self.league_index = list(LEAGUES).index(self.league); self.mode = 'leagues'
+        self.message = 'Choose a sport.'
+
+    def move(self, step):
+        size = {'home': len(HOME_ITEMS), 'leagues': len(LEAGUES), 'games': len(self.games), 'replays': len(self.replays),
+                'channels': len(self.visible_channels()), 'settings': len(self.settings_rows()),
+                'replay_sources': len(self.current_bundle.sources) if self.current_bundle else 0,
+                'feeds': len(self.visible_feeds())}.get(self.mode, 0)
+        field = {'home': 'home_index', 'leagues': 'league_index', 'games': 'gi', 'replays': 'ri', 'channels': 'ci',
+                 'settings': 'settings_index', 'replay_sources': 'bundle_index', 'feeds': 'fi'}.get(self.mode)
+        if not field: return
+        setattr(self, field, min(max(0, size-1), max(0, getattr(self, field) + step)))
+        if self.mode == 'replays': self.replay_selection_touched = True
+        if self.mode == 'feeds': self.feed_selection_touched = True
+
+    def open_selected(self):
+        if self.mode == 'home':
+            action = HOME_ITEMS[self.home_index][0]
+            if action == 'search': self.open_search()
+            elif action == 'settings': self.open_settings()
+            else: self.open_section(action)
+        elif self.mode == 'leagues':
+            self.league = list(LEAGUES)[self.league_index]
+            if self.league_cancel == 'feeds': self.leave_feeds()
+            self.league_cancel = None; self.search = ''; self.gi = 0
+            if self.section == 'replays': self.mode = 'replays'; self.replay_search = ''; self.refresh_replays()
+            else: self.mode = 'games'; self.refresh_games()
+        elif self.mode == 'games' and self.games:
+            self.open_feeds('live', None)
+        elif self.mode == 'replays' and self.replays:
+            self.current_replay = self.replays[self.ri]; self.replay_selection_touched = True
+            self.open_feeds('replay', None)
+        elif self.mode == 'channels' and self.visible_channels():
+            self.current_channel = self.visible_channels()[self.ci]
+            self.open_feeds('tv', 'channels')
+        elif self.mode == 'replay_sources' and self.current_bundle.sources:
+            self.current_replay = self.current_bundle.sources[self.bundle_index]
+            self.league = self.current_bundle.league
+            self.open_feeds('replay', 'replay_sources')
+        elif self.mode == 'settings':
+            self.settings_rows()[self.settings_index][2]()
+        elif self.mode == 'feeds' and self.visible_feeds():
+            self.feed_selection_touched = True; self.begin_feed_action(self.visible_feeds()[self.fi], 'play')
+
+    def open_feeds(self, context, origin):
+        self.feed_context = context; self.feed_return = origin; self.mode = 'feeds'
+        self.filter = 'all'; self.provider_filter = 'all'; self.feed_search = ''; self.refresh_feeds()
+
+    def go_back(self):
+        """Up one level: sources -> list -> sport -> home."""
+        if self.mode == 'feeds':
+            self.leave_feeds()
+            origin = self.feed_return or {'replay': 'replays', 'tv': 'channels'}.get(self.feed_context, 'games')
+            self.feed_return = None; self.mode = origin
+            if origin == 'search': self.rebuild_global_results()
+            self.message = {'replays': 'Select a replay.', 'channels': 'Select a channel.', 'games': 'Select a game.',
+                            'replay_sources': 'Choose a replay source.'}.get(origin, 'Returned to list.')
+        elif self.mode == 'leagues':
+            # A sport picker opened from a list returns there; the section's own picker goes home.
+            self.mode, self.league_cancel = self.league_cancel or 'home', None
+            self.message = 'Returned to list.'
+        elif self.mode in ('games', 'replays'):
+            if self.mode == 'replays': self.replay_generation += 1; self.replay_pending = 0
+            self.section = 'sports' if self.mode == 'games' else 'replays'
+            self.league_index = list(LEAGUES).index(self.league); self.league_cancel = None; self.mode = 'leagues'
+            self.message = 'Choose a sport.'
+        elif self.mode == 'replay_sources':
+            self.mode = 'search'; self.rebuild_global_results()
+        elif self.mode == 'settings':
+            self.mode = self.settings_return or 'home'
+        elif self.mode == 'channels':
+            self.mode = 'home'
+        else:
+            self.message = 'This is the start. Press q to quit.'
+
+    def filter_list(self):
+        if self.mode == 'channels':
+            self.channel_filter = self.prompt('Filter channels (blank shows all):', self.channel_filter).strip()
+            self.ci = 0; self.message = f'{len(self.visible_channels())} channels shown.'
+        elif self.mode == 'games':
+            self.search = self.prompt('Filter games by team (blank shows all):').strip()
             self.apply_search(); self.message = f'{len(self.games)} games shown.'
-        elif key == ord('a'): self.configure_addon()
-        elif key == ord('d'): self.configure_resolver()
-        elif self.mode == 'feeds' and key == ord('f') and self.feed_context == 'live':
-            filters = ['all','home','away','unknown'];
-            if self.games[self.gi].lakers_side: filters.insert(1, 'lakers')
-            self.filter = filters[(filters.index(self.filter)+1)%len(filters)]; self.fi=0; self.feed_selection_touched=True
-        elif self.mode == 'feeds' and key == ord('o'):
-            names = ['all'] + list(dict.fromkeys(f.source for f in self.feeds if id(f) not in self.hidden_feeds))
-            if self.provider_filter in names:
-                self.provider_filter = names[(names.index(self.provider_filter)+1)%len(names)]
-            else:
-                self.provider_filter = 'all'
-            self.fi = 0; self.feed_selection_touched = True
-            self.message = f'Source: {self.provider_filter}.'
-        elif self.mode == 'feeds' and key == ord('/'):
-            self.feed_search = self.prompt('Search providers or channels (blank clears):')
+        elif self.mode == 'replays':
+            self.replay_search = self.prompt('Search replay titles (blank shows recent):').strip()
+            self.refresh_replays()
+        elif self.mode == 'feeds':
+            self.feed_search = self.prompt('Filter sources (blank shows all):')
             self.fi = 0; self.feed_selection_touched = True
             self.message = f'{len(self.visible_feeds())} matching choices.'
-        elif self.mode == 'feeds' and key == ord('t') and self.visible_feeds():
-            self.feed_selection_touched = True; self.test_feed(self.visible_feeds()[self.fi])
-        elif self.mode == 'feeds' and key == ord('g'):
-            visible = self.visible_feeds()
-            selected = visible[self.fi] if self.fi < len(visible) else None
+
+    def feed_key(self, key):
+        visible = self.visible_feeds()
+        selected = visible[self.fi] if self.fi < len(visible) else None
+        if key == ord('x') and selected:
+            self.feed_selection_touched = True; self.test_feed(selected)
+        elif key == ord('i') and selected:
+            self.feed_selection_touched = True; self.begin_feed_action(selected, 'inspect')
+        elif key == ord('h') and self.feed_context == 'live':
+            filters = ['all', 'home', 'away', 'unknown']
+            self.filter = filters[(filters.index(self.filter)+1) % len(filters)]; self.fi = 0; self.feed_selection_touched = True
+            self.message = f'Broadcast side: {self.filter}.'
+        elif key == ord('o'):
+            names = ['all'] + list(dict.fromkeys(f.source for f in self.feeds if id(f) not in self.hidden_feeds))
+            self.provider_filter = names[(names.index(self.provider_filter)+1) % len(names)] if self.provider_filter in names else 'all'
+            self.fi = 0; self.feed_selection_touched = True; self.message = f'Source: {self.provider_filter}.'
+        elif key == ord('g'):
             self.rank_by_checks = not self.rank_by_checks
             visible = self.visible_feeds()
-            selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
-            self.fi = selected_index if selected_index is not None else 0
+            self.fi = next((index for index, item in enumerate(visible) if item is selected), 0)
             self.feed_selection_touched = True
             self.message = 'Ranked by reachability and your checks.' if self.rank_by_checks else 'Directory order.'
-        elif self.mode == 'feeds' and key == ord('i') and self.visible_feeds():
-            feed = self.visible_feeds()[self.fi]
-            self.feed_selection_touched = True; self.begin_feed_action(feed, 'inspect')
-        elif self.mode == 'feeds' and key == ord('b'):
-            self.dual_stream = not self.dual_stream; self.config['dual_stream'] = self.dual_stream; save_config(self.config)
-            self.message = ('Live playback adds a backup source when one resolves.' if self.dual_stream
-                            else 'Backup source off; live streams play directly.')
-        elif self.mode == 'feeds' and key == ord('m'):
-            self.ad_breaks = breaks.MODES[(breaks.MODES.index(self.ad_breaks)+1) % len(breaks.MODES)]
-            self.config['ad_breaks'] = self.ad_breaks; save_config(self.config)
-            self.message = 'During detected ads: ' + breaks.LABELS[self.ad_breaks] + '.'
-            if not self.ai_ad_mute: self.message += ' Applies when run with --ai-ad-mute.'
-        elif self.mode == 'feeds' and key == ord('c'):
-            self.cache = {5:15,15:30,30:5}[self.cache]; self.config['cache']=self.cache; save_config(self.config)
-        elif self.mode == 'feeds' and key == ord('v'):
-            if self.player != 'mpv':
-                self.message = 'Switch to mpv for terminal video.'
-            else:
-                self.terminal_video = not self.terminal_video; self.config['terminal_video']=self.terminal_video; save_config(self.config)
-                self.message = 'Terminal video enabled.' if self.terminal_video else 'Window video enabled.'
-        elif self.mode == 'feeds' and key == ord('p'):
-            if self.player != 'mpv':
-                self.player = 'mpv'
-            elif sys.platform == 'darwin' and find_iina():
-                self.player = 'iina'
-            elif sys.platform.startswith('linux') and find_celluloid():
-                self.player = 'celluloid'
-            elif sys.platform == 'darwin':
-                self.message = 'IINA not found. Install it with: brew install --cask iina'
-                return True
-            elif sys.platform.startswith('linux'):
-                self.message = 'Celluloid not found. Install it with your package manager.'
-                return True
-            else:
-                self.message = 'No alternate player configured on this platform.'
-                return True
-            self.config['player'] = self.player; save_config(self.config)
-            self.message = f'Player: {self.player.upper()}.'
-        elif self.mode == 'feeds' and key == ord('u'):
+        elif key == ord('u'):
             value = self.prompt('Direct media URL:')
-            if safe_url(value): self.play(Feed('Manual','Pasted URL',url=value,kind='direct'))
+            if safe_url(value): self.play(Feed('Manual', 'Pasted URL', url=value, kind='direct'))
             else: self.message = 'Enter a valid HTTP(S) media URL.'
-        return True
+
+    def settings_rows(self):
+        """(label, current value, change) for the settings screen."""
+        return [
+            ('Player', self.player.upper(), self.cycle_player),
+            ('Cache', f'{self.cache} seconds', self.cycle_cache),
+            ('Video in the terminal', 'on' if self.terminal_video else 'off', self.toggle_terminal_video),
+            ('Backup source for live streams', 'on' if self.dual_stream else 'off', self.toggle_backup),
+            ('During detected ads', breaks.LABELS[self.ad_breaks] + ('' if self.ai_ad_mute else ' (needs --ai-ad-mute)'), self.cycle_ad_breaks),
+            ('Sports add-on', 'set' if self.config.get('addon') else 'none', self.configure_addon),
+            ('PPV resolver folder', self.config.get('resolver_dir') or 'default', self.configure_resolver),
+        ]
+
+    def cycle_player(self):
+        if self.player != 'mpv': self.player = 'mpv'
+        elif sys.platform == 'darwin' and find_iina(): self.player = 'iina'
+        elif sys.platform.startswith('linux') and find_celluloid(): self.player = 'celluloid'
+        else:
+            self.message = ('IINA not found. Install it with: brew install --cask iina' if sys.platform == 'darwin' else
+                            'Celluloid not found. Install it with your package manager.' if sys.platform.startswith('linux')
+                            else 'No alternate player configured on this platform.')
+            return
+        if self.player != 'mpv' and self.terminal_video: self.terminal_video = False; self.config['terminal_video'] = False
+        self.config['player'] = self.player; save_config(self.config); self.message = f'Player: {self.player.upper()}.'
+
+    def cycle_cache(self):
+        self.cache = {5:15, 15:30, 30:5}[self.cache]; self.config['cache'] = self.cache; save_config(self.config)
+        self.message = f'Cache: {self.cache} seconds.'
+
+    def toggle_terminal_video(self):
+        if self.player != 'mpv': self.message = 'Terminal video needs mpv.'; return
+        self.terminal_video = not self.terminal_video; self.config['terminal_video'] = self.terminal_video; save_config(self.config)
+        self.message = 'Terminal video enabled.' if self.terminal_video else 'Window video enabled.'
+
+    def toggle_backup(self):
+        self.dual_stream = not self.dual_stream; self.config['dual_stream'] = self.dual_stream; save_config(self.config)
+        self.message = ('Live playback adds a backup source when one resolves.' if self.dual_stream
+                        else 'Backup source off; live streams play directly.')
+
+    def cycle_ad_breaks(self):
+        self.ad_breaks = breaks.MODES[(breaks.MODES.index(self.ad_breaks)+1) % len(breaks.MODES)]
+        self.config['ad_breaks'] = self.ad_breaks; save_config(self.config)
+        self.message = 'During detected ads: ' + breaks.LABELS[self.ad_breaks] + '.'
+        if not self.ai_ad_mute: self.message += ' Applies when run with --ai-ad-mute.'
 
     def run(self):
         try:
@@ -2562,7 +2619,7 @@ def main():
             if not games: print(f'No live or upcoming {LEAGUES[league][0]} games found for that date.'); return 0
             for i, game in enumerate(games, 1):
                 print(f'{i:2}. {game.start.astimezone():%Y-%m-%d %H:%M %Z}  {game.title}')
-            g = next((game for game in games if game.lakers_side), games[0])
+            g = next((game for game in games if game.state == 'live'), games[0])
             print('\nStreams for:', g.title)
             print('TV:', ', '.join(g.broadcasts) or 'not listed')
             feeds, errors = fetch_feeds(g, config)
@@ -2581,14 +2638,14 @@ def main():
                       ai_ad_observe_enabled=args.ai_ad_observe)
             app.record_dir = args.record
             if args.search:
-                app.mode = 'search'; app.search_return = 'leagues'
+                app.mode = 'search'; app.search_return = 'home'
                 app.message = 'Start typing a team, matchup, or league.'
             if args.league:
                 app.league = args.league
                 app.league_index = list(LEAGUES).index(args.league)
-                app.mode = 'games'
+                app.section = 'sports'; app.mode = 'games'
             if args.date: app.day = dt.date.fromisoformat(args.date)
-            if args.tv: app.open_channels()
+            if args.tv: app.open_section('tv')
             app.run()
         curses.wrapper(run_ui)
     except KeyboardInterrupt:

@@ -97,11 +97,10 @@ class TvModeTests(unittest.TestCase):
         app.mode = 'games'
         channels = [tv.Channel('CNN', [object()], True), tv.Channel('Fox News', [object()], True)]
         with patch.object(tv, 'directory', return_value=(channels, ['iptv-org: URLError'])):
-            app.open_channels()
+            app.open_section('tv')
             app.channel_queue.put(app.channel_queue.get(timeout=2))
             self.assertTrue(app.poll_channels())
         self.assertEqual(app.mode, 'channels')
-        self.assertEqual(app.tv_return, 'games')
         self.assertIn('iptv-org: URLError', app.message)
         app.channel_filter = 'fox'
         self.assertEqual([c.name for c in app.visible_channels()], ['Fox News'])
@@ -121,6 +120,24 @@ class TvModeTests(unittest.TestCase):
             app.play(nba.Feed('iptv-org', '720p', kind='direct'))
         monitor.assert_not_called()
         self.assertIn('stays off for TV channels', app.message)
+
+    def test_search_finds_channels_and_opens_their_sources(self):
+        app = nba.App(None, {})
+        app.channels = [tv.Channel('CNBC', [tv.Source('iptv-org', '720p', 'https://tv.example/cnbc.m3u8', 'direct')], True),
+                        tv.Channel('CNN', [], True), tv.Channel('BBC News', [], False)]
+        app.mode = 'home'; app.feed_workers = [object()]
+        with patch.object(app, 'refresh_feeds'):
+            app.handle_key(ord('/'), '/')
+            for char in 'cnbc': app.handle_key(ord(char), char)
+            channels = [hit for hit in app.search_results if hit.kind == 'channel']
+            self.assertEqual([hit.title for hit in channels], ['CNBC'])
+            self.assertEqual(app.search_results[0].title, 'CNBC')  # a channel name leads with channels
+            self.assertIn((0, '   CNBC', ''), app.search_rows())
+            app.search_position = app.search_results.index(channels[0])
+            app.handle_key(10, None)
+            self.assertEqual((app.mode, app.feed_context, app.current_channel.name), ('feeds', 'tv', 'CNBC'))
+            app.handle_key(27, None)
+            self.assertEqual(app.mode, 'search')
 
     def test_backups_cover_tv_channels(self):
         app = nba.App(None, {})

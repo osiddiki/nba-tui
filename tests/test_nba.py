@@ -32,7 +32,6 @@ class DiscoveryTests(unittest.TestCase):
         data = {'streams': [{'streams': [event(self.start), event(self.start + dt.timedelta(days=2))]}]}
         feeds = nba.ppv_feeds(data, self.game)
         self.assertEqual([(f.side, f.kind) for f in feeds], [('home', 'ppv'), ('away', 'ppv')])
-        self.assertEqual(self.game.lakers_side, 'away')
 
     def test_ppv_omits_expired_events(self):
         event = {'name':'Lakers vs Clippers', 'starts_at':int(self.start.timestamp()),
@@ -52,7 +51,6 @@ class DiscoveryTests(unittest.TestCase):
         g, = nba.games_from_espn(data)
         self.assertTrue(nba.title_matches('Miami Heat vs. Atlanta Hawks', g))
         self.assertEqual(g.broadcasts, ['Example TV (Away)'])
-        self.assertEqual(g.lakers_side, '')
 
     def test_finished_events_are_hidden_without_hiding_delayed_games(self):
         def event(ident, status):
@@ -448,7 +446,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_wnba_league_is_loaded_only_after_selection(self):
         class Screen:
-            def __init__(self): self.keys = iter([ord('r'), ord('j'), 10, ord('q')])
+            def __init__(self): self.keys = iter([ord('1'), ord('j'), 10, ord('q')])
             def keypad(self, value): pass
             def timeout(self, value): pass
             def getch(self): return next(self.keys)
@@ -458,9 +456,11 @@ class DiscoveryTests(unittest.TestCase):
             app.run()
         self.assertEqual([call.args[1] for call in fetch.call_args_list], ['wnba'])
 
-    def test_lowercase_s_changes_sport_and_d_opens_resolver_settings(self):
+    def test_s_changes_sport_and_settings_set_the_resolver(self):
+        # Home -> live sports -> NBA -> a game's sources -> s (sport picker) -> Esc back to sources
+        # -> , settings -> the PPV resolver row -> Enter.
         class Screen:
-            def __init__(self): self.keys = iter([10, 10, ord('s'), 27, ord('d'), ord('q')])
+            def __init__(self): self.keys = iter([10, 10, 10, ord('s'), 27, ord(','), *[ord('j')] * 6, 10, ord('q')])
             def keypad(self, value): pass
             def timeout(self, value): pass
             def getch(self): return next(self.keys)
@@ -470,8 +470,9 @@ class DiscoveryTests(unittest.TestCase):
              patch.object(nba, 'get_games', return_value=[self.game]), patch.object(nba, 'feed_tasks', return_value=[]), \
              patch.object(app, 'configure_resolver') as resolver:
             app.run()
-        self.assertEqual(modes[0], 'leagues')
-        self.assertEqual(modes[-3:], ['leagues', 'feeds', 'feeds'])
+        self.assertEqual(modes[0], 'home')
+        self.assertIn('leagues', modes); self.assertEqual(modes[modes.index('leagues', modes.index('feeds')) + 1], 'feeds')
+        self.assertEqual(modes[-1], 'settings')
         resolver.assert_called_once()
 
     def test_feed_loading_continues_while_sport_menu_is_open(self):

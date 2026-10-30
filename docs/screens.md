@@ -1,77 +1,74 @@
 # Screens
 
-The app's screens and keys form the statechart in `sportscli/screens.py`.
-`tests/test_screens.py` explores every reachable screen state with every key
-(offline, with sample games, replays and channels) and checks that:
+The app opens on Home: live sports, replays, live TV, search and settings. Keys mean the
+same thing on every screen:
+
+| Key | Does |
+|---|---|
+| `1` `2` `3` | Live sports, replays, live TV |
+| `/` | Search teams, players, games and channels |
+| `,` | Settings |
+| Enter or → | Open or play |
+| Esc, ← or Backspace | Back up one level |
+| `s` | Change sport (schedules, replays and their sources) |
+| `f` | Filter the current list |
+| `r` | Refresh the current list |
+| `?` · `q` | Help · quit |
+
+The statechart lives in `sportscli/screens.py`. `tests/test_screens.py` explores every
+reachable screen state with every key (offline, with sample games, replays and channels)
+and checks that:
 
 - every move between screens is one the chart allows, and every chart move happens;
-- Esc, repeated, always leads back to the sports list;
-- help and search always return to the screen they were opened from;
+- Esc, repeated, always leads back to Home;
+- help and search return to the screen they were opened from;
+- `/`, `1`, `2`, `3` and `,` lead to the same place from every screen, and `s` only ever changes sport;
 - `q` (Ctrl-X in search) quits from every screen;
-- every key shown in a screen's footer does something there.
+- every key shown in a screen's footer does something there, in every league.
 
-Change the chart in the same commit as the key handling in `App.handle_key`.
+Change the chart in the same commit as the key handling in `App.handle_key`. The diagram
+leaves out the global keys except from Home, since every screen has them.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> leagues
-    leagues --> next_: Enter
+    [*] --> home
+    home --> channels: Enter
+    home --> leagues: Enter
+    home --> search: Enter
+    home --> settings: Enter
+    home --> home: Esc
+    home --> leagues: 1
+    home --> leagues: 2
+    home --> channels: 3
+    home --> search: /
+    home --> settings: ,
+    home --> help: ?
+    home --> [*]: q
+    leagues --> section_: Enter
     leagues --> back_: Esc
-    leagues --> leagues: Esc
-    leagues --> channels: t
-    leagues --> search: s
-    leagues --> search: /
-    leagues --> search: Space
-    leagues --> help: ?
-    leagues --> search: Ctrl-F
-    leagues --> [*]: q
+    leagues --> home: Esc
     games --> feeds: Enter
     games --> leagues: Esc
     games --> leagues: s
-    games --> channels: t
-    games --> replays: R
-    games --> search: /
-    games --> help: ?
-    games --> search: Ctrl-F
-    games --> [*]: q
     replays --> feeds: Enter
-    replays --> games: Esc
-    replays --> games: R
+    replays --> leagues: Esc
     replays --> leagues: s
-    replays --> search: /
-    replays --> help: ?
-    replays --> search: Ctrl-F
-    replays --> [*]: q
+    channels --> feeds: Enter
+    channels --> home: Esc
     replay_sources --> feeds: Enter
     replay_sources --> search: Esc
-    replay_sources --> leagues: s
-    replay_sources --> help: ?
-    replay_sources --> search: Ctrl-F
-    replay_sources --> [*]: q
-    channels --> feeds: Enter
-    channels --> back_: Esc
-    channels --> back_: t
-    channels --> leagues: s
-    channels --> help: ?
-    channels --> search: Ctrl-F
-    channels --> [*]: q
     feeds --> origin_: Esc
     feeds --> leagues: s
-    feeds --> help: ?
-    feeds --> search: Ctrl-F
-    feeds --> [*]: q
+    settings --> back_: Esc
     search --> feeds: Enter
     search --> replay_sources: Enter
     search --> back_: Esc
-    search --> leagues: Esc
-    search --> leagues: Tab
-    search --> help: ?
+    search --> home: Esc
     search --> [*]: Ctrl-X
     help --> back_: Esc
     help --> back_: ?
-    help --> search: Ctrl-F
     help --> [*]: q
     note right of back_: the screen that opened this one
     note right of origin_: the list the sources came from
-    note right of next_: games or replays
+    note right of section_: games or replays
 ```

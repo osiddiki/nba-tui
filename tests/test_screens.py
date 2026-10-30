@@ -15,8 +15,8 @@ from unittest.mock import patch
 from sportscli import app as nba, replays, screens, tv
 
 KEYS = {'Enter': 10, 'Esc': 27, 'Backspace': 127, 'Tab': 9, 'Space': 32, 'Ctrl-F': 6, 'Ctrl-X': 24,
-        'Up': curses.KEY_UP, 'Down': curses.KEY_DOWN}
-EXTRA = list('hTSRrjk[]lfoibmcvpug1/?')
+        'Up': curses.KEY_UP, 'Down': curses.KEY_DOWN, 'Left': curses.KEY_LEFT, 'Right': curses.KEY_RIGHT}
+EXTRA = list('123/,?qhtsrjk[]lfoixgu')
 ALPHABET = sorted({*KEYS, *(k for keys in screens.CHART.values() for k in keys), *EXTRA})
 MAX_DEPTH = 7
 
@@ -70,22 +70,24 @@ def press(app, name):
 def state(app):
     """The screen and every history value that decides where later keys lead."""
     return (app.mode, app.feed_context, app.feed_return, app.search_return, app.help_return,
-            app.league_cancel, app.league_return, app.tv_return)
+            app.league_cancel, app.section, app.settings_return)
 
 
 def snapshot(app):
-    return (state(app), app.message, app.gi, app.ci, app.fi, app.ri, app.league_index, app.day, app.filter,
+    return (state(app), app.message, app.gi, app.ci, app.fi, app.ri, app.league_index, app.home_index,
+            app.settings_index, app.day, app.filter,
             app.provider_filter, app.rank_by_checks, app.dual_stream, app.ad_breaks, app.cache, app.terminal_video,
             app.player, app.help_scroll, app.search_position, app.channel_filter, app.feed_search, len(app.calls))
 
 
 def resolve(target, before):
-    mode, context, feed_return, search_return, help_return, league_cancel, league_return, tv_return = before
+    mode, context, feed_return, search_return, help_return, league_cancel, section, settings_return = before
     if target == '<back>':
-        return {'help': help_return, 'search': search_return, 'leagues': league_cancel, 'channels': tv_return}[mode]
+        return {'help': help_return, 'search': search_return or 'home', 'leagues': league_cancel or 'home',
+                'settings': settings_return or 'home'}[mode]
     if target == '<origin>':
         return feed_return or ('replays' if context == 'replay' else 'channels' if context == 'tv' else 'games')
-    if target == '<next>': return league_return
+    if target == '<section>': return 'replays' if section == 'replays' else 'games'
     return target
 
 
@@ -146,7 +148,9 @@ class ScreenChartTests(unittest.TestCase):
                 if after not in allowed:
                     problems.append(f'{" ".join(path) or "start"} then {name}: {before[0]} -> {after}, chart allows {sorted(map(str, allowed))}')
                 taken.add((before[0], key))
-        declared = {(screen, key) for screen, keys in screens.CHART.items() for key in keys}
+        # Pressing the key for the screen you are on (3 on Live TV, , in settings) stays put.
+        declared = {(screen, key) for screen, keys in screens.CHART.items() for key, targets in keys.items()
+                    if targets - {screen}}
         missing = declared - taken - screens.NEEDS_LIVE_DATA - {('replay_sources', key) for key in screens.CHART['replay_sources']}
         problems += [f'never taken: {screen} {key}' for screen, key in sorted(missing)]
         self.assertEqual(sorted(set(problems))[:40], [])
@@ -161,11 +165,11 @@ class ScreenChartTests(unittest.TestCase):
 
     def test_help_and_search_return_to_the_same_screen(self):
         for before, path in self.paths.items():
-            if before[0] != 'help':
+            if before[0] not in ('help', 'search'):  # in search, ? is typed into the query
                 app = self.replay(path); press(app, '?'); press(app, 'Esc')
                 self.assertEqual(state(app)[0], before[0], f'help from {" ".join(path)}')
-            if before[0] != 'search':
-                app = self.replay(path); press(app, 'Ctrl-F'); press(app, 'Esc')
+            if before[0] not in ('search', 'help'):
+                app = self.replay(path); press(app, '/'); press(app, 'Esc')
                 self.assertEqual(state(app)[0], before[0], f'search from {" ".join(path)}')
 
     def test_quit_works_everywhere(self):
@@ -175,7 +179,8 @@ class ScreenChartTests(unittest.TestCase):
     def test_every_key_shown_in_a_footer_does_something(self):
         problems = []
         words = {'Enter': ['Enter'], 'Esc': ['Esc'], 'Space': ['Space'], 'Tab': ['Tab'], 'Ctrl-F': ['Ctrl-F'],
-                 'Ctrl-X': ['Ctrl-X'], '^X': ['Ctrl-X'], 'Up/Down': ['Down'], '↑↓': ['Down'], 'j/k': ['Down']}
+                 'Ctrl-X': ['Ctrl-X'], '^X': ['Ctrl-X'], 'Up/Down': ['Down'], '↑↓': ['Down'], 'j/k': ['Down'],
+                 'Ctrl-U': [], '^U': [], 'Type': []}
         for before, path in self.paths.items():
             app = self.replay(path); app.render()
             rows, _ = app.scr.getmaxyx()
@@ -190,23 +195,36 @@ class ScreenChartTests(unittest.TestCase):
                 for name in keys:
                     app = self.replay(path); before_snapshot = snapshot(app)
                     if name in ('Down', 'Enter') and len(self.items(app)) < 2: continue  # nothing to move to or open
+                    if screens.GLOBAL.get(name) == {before[0]}: continue  # the key for the screen you are on
                     running = press(app, name)
                     if running and snapshot(app) == before_snapshot:
                         problems.append(f'"{hint}" does nothing on {before[0]} ({" ".join(path) or "start"})')
         self.assertEqual(sorted(set(problems))[:40], [])
 
     def test_schedule_footer_keys_work_in_every_league(self):
+        def schedule(league):
+            app = make_app(); press(app, '1'); app.league_index = list(nba.LEAGUES).index(league); press(app, 'Enter')
+            return app
         for league in nba.LEAGUES:
-            app = make_app(); app.league = league
-            press(app, 'Esc'); app.league_index = list(nba.LEAGUES).index(league); press(app, 'Enter')
-            self.assertEqual(app.mode, 'games')
+            app = schedule(league)
+            self.assertEqual((app.mode, app.league), ('games', league))
             app.render(); rows, _ = app.scr.getmaxyx()
             footer = app.scr.text.get(rows - 4, '') + '   ' + app.scr.text.get(rows - 3, '')
-            for hint, key in (('l Lakers', 'l'), ('R replays', 'R'), ('t TV', 't')):
-                if hint not in footer: continue
-                before = snapshot(app); press(app, key)
+            for hint, key in (('s sport', 's'), ('[ ] date', ']'), ('f filter', 'f'), ('r refresh', 'r'), ('2 replays', '2')):
+                self.assertIn(hint, footer)
+                app = schedule(league); before = snapshot(app); press(app, key)
                 self.assertNotEqual(snapshot(app), before, f'"{hint}" does nothing for {league}')
-                app = make_app(); app.league_index = list(nba.LEAGUES).index(league); press(app, 'Enter')
+
+    def test_keys_never_change_meaning(self):
+        # s always changes sport, / always searches, 1 2 3 always open the same sections.
+        for before, path in self.paths.items():
+            if before[0] in ('search', 'help'): continue
+            for key, expected in (('/', 'search'), ('1', 'leagues'), ('2', 'leagues'), ('3', 'channels'), (',', 'settings')):
+                app = self.replay(path); press(app, key)
+                self.assertEqual(app.mode, expected, f'{key} from {before[0]}')
+            app = self.replay(path)
+            if press(app, 's') and app.mode != before[0]:
+                self.assertEqual(app.mode, 'leagues', f's from {before[0]}')
 
     def test_docs_show_the_current_chart(self):
         import pathlib
@@ -216,7 +234,8 @@ class ScreenChartTests(unittest.TestCase):
     @staticmethod
     def items(app):
         return {'search': app.search_results, 'leagues': nba.LEAGUES, 'games': app.games, 'replays': app.replays,
-                'channels': app.visible_channels(), 'feeds': app.visible_feeds(), 'help': nba.HELP_LINES}.get(app.mode, [])
+                'channels': app.visible_channels(), 'feeds': app.visible_feeds(), 'help': nba.HELP_LINES,
+                'home': nba.HOME_ITEMS, 'settings': app.settings_rows()}.get(app.mode, [])
 
 
 if __name__ == '__main__':
