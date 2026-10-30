@@ -195,6 +195,19 @@ class ScreenChartTests(unittest.TestCase):
                         problems.append(f'"{hint}" does nothing on {before[0]} ({" ".join(path) or "start"})')
         self.assertEqual(sorted(set(problems))[:40], [])
 
+    def test_schedule_footer_keys_work_in_every_league(self):
+        for league in nba.LEAGUES:
+            app = make_app(); app.league = league
+            press(app, 'Esc'); app.league_index = list(nba.LEAGUES).index(league); press(app, 'Enter')
+            self.assertEqual(app.mode, 'games')
+            app.render(); rows, _ = app.scr.getmaxyx()
+            footer = app.scr.text.get(rows - 4, '') + '   ' + app.scr.text.get(rows - 3, '')
+            for hint, key in (('l Lakers', 'l'), ('R replays', 'R'), ('t TV', 't')):
+                if hint not in footer: continue
+                before = snapshot(app); press(app, key)
+                self.assertNotEqual(snapshot(app), before, f'"{hint}" does nothing for {league}')
+                app = make_app(); app.league_index = list(nba.LEAGUES).index(league); press(app, 'Enter')
+
     def test_docs_show_the_current_chart(self):
         import pathlib
         doc = (pathlib.Path(__file__).resolve().parents[1] / 'docs' / 'screens.md').read_text(encoding='utf-8')

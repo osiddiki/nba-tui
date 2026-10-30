@@ -17,6 +17,7 @@ To prove a change in the real app, use the project skill `.claude/skills/verify-
 - `sports-cli`: the only user-facing executable; `sportscli/app.py`: schedules, sources, screens, asynchronous discovery, player launch and configuration.
 - `sportscli/smart_search.py`: local query parsing, team suggestions, and result ranking. `sportscli/data/teams.json` is the bundled ESPN team-name index; refresh it with `python3 -m sportscli.tools.update_teams` when appropriate.
 - `sportscli/screens.py`: the screen statechart. `App.handle_key` implements it and `tests/test_screens.py` explores every screen state with every key against it; update the chart and `docs/screens.md` with any navigation change.
+- `verification/relay/`: TLA+ model of the backup-source failover with `check.sh`; the project skill `verify-relay-failover` says when and how to run it, and `docs/relay-failover.md` shows the verdicts and charts.
 - `sportscli/players.py`: lazy player-name search and bounded roster verification; keep this separate from team search so slow rosters cannot block the UI.
 - `sportscli/progress.py`: optional Rich-backed download progress with a standard-library fallback; no model is downloaded by default.
 - `sportscli/providers.py`: bounded public-page discovery and supported embedded player resolution.

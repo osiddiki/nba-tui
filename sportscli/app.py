@@ -74,6 +74,7 @@ HELP_LINES = [
     'REFRESH        r: reload current list    q: quit',
     'Finished games and explicitly offline sources are hidden from live lists.',
     'Keep this terminal open while playing a local relay stream.',
+    'While a stream plays, keys go to mpv: Space pause, m mute, f fullscreen, q back here.',
 ]
 
 
@@ -1048,7 +1049,7 @@ class App:
             if not self.games:
                 self.put(4, 2, self.spinner() + ' Loading schedule' if self.loading_games else 'No upcoming or live games. Change date or search.')
             self.put(h-4, 1, 'Enter streams   R replays   t TV   s sport   [ ] date')
-            self.put(h-3, 1, 'Esc sports   / search   l Lakers   r refresh   ? help   q quit')
+            self.put(h-3, 1, 'Esc sports   / search   ' + ('l Lakers   ' if self.league == 'nba' else '') + 'r refresh   ? help   q quit')
         elif self.mode == 'replays':
             self.put(2, 1, f'{LEAGUES[self.league][0]}  |  recent replays  |  search: {self.replay_search or "all"}')
             rows = max(1, h-7)

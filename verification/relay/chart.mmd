@@ -1,0 +1,53 @@
+---
+title: "Live relay with a backup source"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: degraded
+    lg1: down
+  }
+  class lg0 orange
+  class lg1 pink
+  s0: Starting
+  s1: Waiting to start
+  s2: Playing from main
+  s3: Main stalled, switching
+  s4: Resuming on backup
+  s5: Both sources stalled
+  s6: Playing from backup
+  s7: Backup stalled, switching
+  s8: Resuming on main
+  [*] --> s0
+  s0 --> s1: a source stops advancing
+  s0 --> s2: the first segment plays
+  s1 --> s0: a source recovers or the relay switches source
+  s2 --> s3: a source stops advancing
+  s3 --> s2: a source recovers
+  s3 --> s4: the relay switches source
+  s3 --> s5: a source stops advancing
+  s2 --> s5: a source stops advancing
+  s0 --> s6: the first segment plays
+  s4 --> s5: a source stops advancing
+  s5 --> s3: a source recovers
+  s5 --> s2: a source recovers
+  s5 --> s4: a source recovers
+  s5 --> s7: a source recovers
+  s6 --> s5: a source stops advancing
+  s4 --> s7: a source stops advancing
+  s5 --> s6: a source recovers
+  s4 --> s6: the matching segment plays or a segment fails everywhere and is skipped
+  s7 --> s2: the relay switches source
+  s7 --> s5: a source stops advancing
+  s7 --> s4: a source recovers
+  s6 --> s7: a source stops advancing
+  s7 --> s6: a source recovers
+  s7 --> s8: the relay switches source
+  s8 --> s2: the matching segment plays or a segment fails everywhere and is skipped
+  s8 --> s5: a source stops advancing
+  s5 --> s8: a source recovers
+  s8 --> s3: a source stops advancing
+  s3 --> s6: the relay switches source
+  s3 --> s8: a source recovers
+  class s3 orange
+  class s5 pink
+  class s7 orange
