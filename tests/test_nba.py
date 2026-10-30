@@ -301,7 +301,7 @@ class DiscoveryTests(unittest.TestCase):
         self.addCleanup(app.close)
         app.games = [self.game]; app.mode = 'feeds'; app.feed_generation = 1
         feeds = [nba.Feed('Source', name, url='https://example.com/' + name, kind='direct')
-                 for name in ('one', 'two', 'three')]
+                 for name in ('one', 'two', 'three', 'four', 'five', 'six', 'seven')]
         app.feeds = feeds
         def probe(feed):
             if feed.label == 'two':
@@ -312,12 +312,30 @@ class DiscoveryTests(unittest.TestCase):
             end = time.monotonic() + 1
             while 'checking' in app.auto_checks.values() and time.monotonic() < end:
                 app.poll_auto_checks(); time.sleep(.01)
-        self.assertEqual(check.call_count, 2)
+        self.assertEqual(check.call_count, nba.AUTO_CHECKS_PER_DIRECTORY)
         self.assertEqual(app.auto_checks[id(feeds[0])], 'OK')
         self.assertEqual(app.auto_checks[id(feeds[1])], 'HTTP 403')
-        self.assertNotIn(id(feeds[2]), app.auto_checks)
-        self.assertEqual(app.visible_feeds(), feeds)
+        self.assertNotIn(id(feeds[6]), app.auto_checks)
+        # A failed check keeps the source visible but moves it below the others.
+        self.assertEqual(app.visible_feeds(), [feeds[0], *feeds[2:], feeds[1]])
+        self.assertEqual(app.fi, 0)
         self.assertNotIn('health', app.config)
+
+    def test_failed_check_sinks_source_without_moving_a_chosen_selection(self):
+        app = nba.App(None, {})
+        self.addCleanup(app.close)
+        app.feed_generation = 1
+        one, two, three = feeds = [nba.Feed('Source', name, url='https://example.com/' + name, kind='direct')
+                                   for name in ('one', 'two', 'three')]
+        app.feeds = feeds
+        for feed in feeds: app.auto_checks[id(feed)] = 'checking'
+        app.auto_queue.put((1, one, 'HTTP 404')); app.poll_auto_checks()
+        self.assertEqual(app.visible_feeds(), [two, three, one])
+        self.assertIs(app.visible_feeds()[app.fi], two)  # untouched: the top source is selected
+        app.fi = 1; app.feed_selection_touched = True  # the user picks three
+        app.auto_queue.put((1, two, 'HTTP 403')); app.poll_auto_checks()
+        self.assertEqual(app.visible_feeds(), [three, one, two])
+        self.assertIs(app.visible_feeds()[app.fi], three)
 
     def test_mpv_headers_are_arguments_not_shell_and_reject_injection(self):
         command = nba.mpv_command('https://example.com/a.m3u8',

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 UTC = dt.timezone.utc
 SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+AUTO_CHECKS_PER_DIRECTORY, AUTO_CHECKS_PER_SCREEN = 6, 8
 UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 ESPN = 'https://site.api.espn.com/apis/site/v2/sports'
 LEAGUES = {
@@ -829,7 +830,7 @@ class App:
         self.auto_queue = queue.Queue()
         self.auto_jobs = queue.Queue(maxsize=24)
         self.auto_workers = []
-        self.auto_generation = None
+        self.auto_generation = None; self.auto_started = 0
         self.manual_checks = set()
         self.manual_queue = queue.Queue()
         self.manual_status = {}
@@ -895,6 +896,12 @@ class App:
                 reachability = 2 if status == 'OK' else 0 if isinstance(status, str) and status.startswith('HTTP ') else 1
                 return (reachability, *grading.score(history.get(grading.source_key(feed), {})))
             feeds.sort(key=rank, reverse=True)
+        else:
+            # Keep directory order, but a source whose check failed goes below the rest.
+            def failed(feed):
+                status = self.manual_status.get(id(feed), self.auto_checks.get(id(feed)))
+                return isinstance(status, str) and status.startswith('HTTP ')
+            feeds.sort(key=failed)
         return feeds
 
     def search_rows(self, width=None):
@@ -1734,16 +1741,20 @@ class App:
     def start_auto_checks(self, generation, feeds):
         if self.closed.is_set() or generation != self.feed_generation: return
         if generation != self.auto_generation:
-            self.auto_generation = generation
+            self.auto_generation = generation; self.auto_started = 0
             while True:
                 try: self.auto_jobs.get_nowait()
                 except queue.Empty: break
-        for feed in [feed for feed in feeds if feed.kind in ('sf', 'direct', 'candidate')][:2]:
+        # Check the top few of each directory so a working source is visible before the user picks one.
+        room = max(0, AUTO_CHECKS_PER_SCREEN - self.auto_started)
+        chosen = [feed for feed in feeds if feed.kind in ('sf', 'direct', 'candidate')][:min(AUTO_CHECKS_PER_DIRECTORY, room)]
+        self.auto_started += len(chosen)
+        for feed in chosen:
             self.auto_checks[id(feed)] = 'checking'
             try: self.auto_jobs.put_nowait((generation, feed))
             except queue.Full: self.auto_checks[id(feed)] = '?'
         if not self.auto_workers:
-            for index in range(3):
+            for index in range(4):
                 worker = threading.Thread(target=self._auto_check_worker, name=f'source-check-{index}', daemon=True)
                 self.auto_workers.append(worker); worker.start()
 
@@ -1764,8 +1775,10 @@ class App:
 
     def poll_auto_checks(self):
         changed = False
-        before = self.visible_feeds() if self.rank_by_checks else []
-        selected = before[self.fi] if self.fi < len(before) else None
+        before = self.visible_feeds()
+        # A source the user picked stays selected as results reorder the list; otherwise the top one is.
+        chosen = self.feed_selection_touched or self.fi > 0
+        selected = before[self.fi] if chosen and self.fi < len(before) else None
         old_index = self.fi
         while True:
             try: generation, feed, status = self.auto_queue.get_nowait()
@@ -1773,10 +1786,11 @@ class App:
             if generation != self.feed_generation or id(feed) not in self.auto_checks: continue
             self.auto_checks[id(feed)] = status
             changed = True
-        if changed and self.rank_by_checks:
+        if changed:
             visible = self.visible_feeds()
             selected_index = next((index for index, item in enumerate(visible) if item is selected), None)
-            self.fi = selected_index if selected_index is not None else min(old_index, max(0, len(visible)-1))
+            self.fi = (selected_index if selected_index is not None else
+                       min(old_index, max(0, len(visible)-1)) if chosen else 0)
         return changed
 
     def prompt(self, label, initial=''):

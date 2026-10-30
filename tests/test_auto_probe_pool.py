@@ -11,7 +11,7 @@ class AutomaticProbePoolTests(unittest.TestCase):
         app = nba.App(None, {})
         app.mode = 'feeds'; app.feed_generation = 1
         self.addCleanup(app.close)
-        release, three_started = threading.Event(), threading.Event()
+        release, four_started = threading.Event(), threading.Event()
         lock = threading.Lock()
         active = 0
         peak = 0
@@ -19,7 +19,7 @@ class AutomaticProbePoolTests(unittest.TestCase):
             nonlocal active, peak
             with lock:
                 active += 1; peak = max(peak, active)
-                if active == 3: three_started.set()
+                if active == 4: four_started.set()
             release.wait(3)
             with lock: active -= 1
             return True
@@ -28,8 +28,8 @@ class AutomaticProbePoolTests(unittest.TestCase):
         try:
             with patch.object(nba, 'quick_probe_feed', side_effect=probe):
                 for group in range(3): app.start_auto_checks(1, pair(str(group)))
-                self.assertTrue(three_started.wait(1))
-                self.assertEqual(len(app.auto_workers), 3)
+                self.assertTrue(four_started.wait(1))
+                self.assertEqual(len(app.auto_workers), 4)
                 for generation in range(2, 22):
                     app.feed_generation = generation
                     app.auto_checks.clear()
@@ -43,7 +43,7 @@ class AutomaticProbePoolTests(unittest.TestCase):
                     if all(app.auto_checks.get(id(feed)) == 'OK' for feed in latest): break
                     time.sleep(.01)
                 self.assertTrue(all(app.auto_checks.get(id(feed)) == 'OK' for feed in latest))
-                self.assertLessEqual(peak, 3)
+                self.assertLessEqual(peak, 4)
         finally:
             release.set()
 
