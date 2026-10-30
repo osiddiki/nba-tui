@@ -65,7 +65,7 @@ When using mpv, close its window or press `q` in mpv to return to the picker. II
 | `Ctrl-F`, `Tab`, `Ctrl-U`, `Ctrl-R`, `Ctrl-X` | Global search, browse sports, clear, refresh, or quit search |
 | `s` (or `S`), `[`, `]`, `/`, `l` | Choose sport, change schedule date, search, or filter for the Lakers |
 | `R` | Switch between the live schedule and replays |
-| `T` | Live TV channels such as CNN, CNBC, MS NOW and Fox News; `/` filters the list |
+| `t` | Live TV channels such as CNN, CNBC, MS NOW and Fox News; `/` filters the list. Start there with `./sports-cli --tv` |
 | `f`, `o`, `r` | Broadcast side, provider, or refresh |
 | `t`, `g`, `i` | Test a source, rank sources by checks, or inspect its media URL |
 | `p`, `c`, `v` | Player, cache size, or mpv terminal video |
@@ -96,7 +96,7 @@ If resolution, a test, or mpv playback fails, the source is hidden for the curre
 
 ### Live TV
 
-Press `T` on the sports or schedule screen for live TV channels. News and the major networks are listed first, followed by about 2,000 other channels. Press `/` to filter by name, then Enter to see the channel's sources. They come from two places: free direct streams listed by [iptv-org](https://github.com/iptv-org/iptv), and DaddyLive's 24/7 channel pages, which are resolved through the local relay when selected. Some free streams work only from the US. Channels play like games, including the backup source; AI ad detection stays off for TV.
+Press `t` on the sports or schedule screen, or start with `./sports-cli --tv`, for live TV channels. `./sports-cli --list --tv` prints the main channels and their sources. News and the major networks are listed first, followed by about 2,000 other channels. Press `/` to filter by name, then Enter to see the channel's sources. They come from two places: free direct streams listed by [iptv-org](https://github.com/iptv-org/iptv), and DaddyLive's 24/7 channel pages, which are resolved through the local relay when selected. Some free streams work only from the US. Channels play like games, including the backup source; AI ad detection stays off for TV.
 
 ### Backup sources
 

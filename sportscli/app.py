@@ -58,7 +58,7 @@ HELP_LINES = [
     'NAVIGATE       Up/Down or j/k: move    Enter: select    Esc: back',
     'SCHEDULE       s: sport    [ / ]: date    /: team search    l: Lakers',
     'REPLAYS        R: replay archive    s: sport    /: search titles',
-    'TV             T: live TV channels (CNN, CNBC, MS NOW, Fox News...)    /: filter',
+    'TV             t: live TV channels (CNN, CNBC, MS NOW, Fox News...)    /: filter    --tv: start there',
     'SOURCES        f: broadcast side    o: provider    /: search choices',
     'CHECKS         t: test selected source    g: rank by your checks',
     'PLAYBACK       p: player    c: cache    v: terminal video (mpv)',
@@ -1013,7 +1013,8 @@ class App:
             for y, key in enumerate(keys[start:start+rows], 3):
                 selected = start+y-3 == self.league_index
                 self.put(y, 2, f'{">" if selected else " "} {LEAGUES[key][0]}', curses.A_REVERSE if selected else 0)
-            self.put(h-3, 1, 'Enter sport   s or / search   Space search   ? help   q quit' if w >= 62 else 'Enter sport   s search   q quit')
+            self.put(h-4, 1, 'Enter sport   t live TV (CNN, CNBC, Fox News...)' if w >= 52 else 'Enter sport   t live TV')
+            self.put(h-3, 1, 's or / search   Space search   ? help   q quit' if w >= 48 else 's search   q quit')
         elif self.mode == 'games':
             self.put(2, 1, f'{LEAGUES[self.league][0]}  |  {self.day:%a %b %d} (ET date)  |  search: {self.search or "all"}')
             rows = max(1, h-7)
@@ -1026,8 +1027,8 @@ class App:
                 self.put(y, 2, f'{">" if selected else " "} {status}  {when}  {game.title}', attr)
             if not self.games:
                 self.put(4, 2, 'Loading schedule...' if self.loading_games else 'No upcoming or live games. Change date or search.')
-            self.put(h-4, 1, 'Enter streams   R replays   s sport   [ ] date')
-            self.put(h-3, 1, '/ search   l Lakers   r refresh   ? help   q quit')
+            self.put(h-4, 1, 'Enter streams   R replays   t TV   s sport   [ ] date')
+            self.put(h-3, 1, 'Esc sports   / search   l Lakers   r refresh   ? help   q quit')
         elif self.mode == 'replays':
             self.put(2, 1, f'{LEAGUES[self.league][0]}  |  recent replays  |  search: {self.replay_search or "all"}')
             rows = max(1, h-7)
@@ -1052,7 +1053,7 @@ class App:
             if not shown:
                 self.put(4, 2, 'Loading channels...' if self.channels_loading else 'No channels match. Press / to change the filter.')
             self.put(h-4, 1, 'Enter sources   / filter   r refresh')
-            self.put(h-3, 1, 'T or Esc back   ? help   q quit')
+            self.put(h-3, 1, 't or Esc back   ? help   q quit')
         elif self.mode == 'replay_sources':
             self.put(2, 1, self.current_bundle.title)
             rows = max(1, h-7)
@@ -2365,6 +2366,11 @@ class App:
                         self.message = 'Choose a sport or press q to quit.'
                     else:
                         self.mode = self.league_cancel; self.message = 'Returned to list.'
+                elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'games':
+                    # Back to the opening sports list, the screen the schedule was chosen from.
+                    self.league_index = list(LEAGUES).index(self.league)
+                    self.league_cancel = None; self.league_return = 'games'
+                    self.mode = 'leagues'; self.message = 'Choose a sport or league.'
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h')) and self.mode == 'replay_sources':
                     self.mode = 'search'; self.rebuild_global_results()
                 elif key in (27, curses.KEY_BACKSPACE, 127, ord('h'), ord('R')) and self.mode == 'replays':
@@ -2376,9 +2382,9 @@ class App:
                     self.league_return = 'replays' if (self.mode in ('replays', 'replay_sources') or
                         (self.mode == 'feeds' and self.feed_context == 'replay')) else 'games'
                     self.mode = 'leagues'; self.message = 'Choose a sport or league.'
-                elif self.mode in ('leagues', 'games') and key == ord('T'):
+                elif self.mode in ('leagues', 'games') and key in (ord('t'), ord('T')):
                     self.open_channels()
-                elif self.mode == 'channels' and key in (27, curses.KEY_BACKSPACE, 127, ord('h'), ord('T')):
+                elif self.mode == 'channels' and key in (27, curses.KEY_BACKSPACE, 127, ord('h'), ord('t'), ord('T')):
                     self.mode = self.tv_return; self.message = 'Returned to list.'
                 elif self.mode == 'channels' and key == ord('/'):
                     self.channel_filter = self.prompt('Filter channels (blank shows all):', self.channel_filter).strip()
@@ -2479,6 +2485,7 @@ def main():
     parser.add_argument('--date', help='Schedule date in YYYY-MM-DD (Eastern time)')
     parser.add_argument('--league', choices=LEAGUES, help='Open a league directly (default: choose in the app; nba for --list)')
     parser.add_argument('--search', action='store_true', help='Open global search directly')
+    parser.add_argument('--tv', action='store_true', help='Open live TV channels (CNN, CNBC, MS NOW, Fox News...) directly')
     parser.add_argument('--addon', help='Stremio sports add-on manifest URL for this run')
     parser.add_argument('--resolver-dir', help='Local ppv-hls-proxy checkout for this run')
     mute = parser.add_mutually_exclusive_group()
@@ -2499,6 +2506,14 @@ def main():
         return 2
     if args.addon: config['addon'] = args.addon
     if args.resolver_dir: config['resolver_dir'] = args.resolver_dir
+    if args.list and args.tv:
+        channels, errors = tv.directory()
+        for channel in channels:
+            if channel.featured or len(channels) <= 50:
+                print(f'{channel.name}: ' + ', '.join(f'{source.provider} {source.label}' for source in channel.sources))
+        print(f'\n{len(channels)} channels in all. Run ./sports-cli --tv to browse and play them.')
+        for error in errors: print('Source error:', error, file=sys.stderr)
+        return 0 if channels else 1
     if args.list:
         try:
             league = args.league or 'nba'
@@ -2533,6 +2548,7 @@ def main():
                 app.league_index = list(LEAGUES).index(args.league)
                 app.mode = 'games'
             if args.date: app.day = dt.date.fromisoformat(args.date)
+            if args.tv: app.open_channels()
             app.run()
         curses.wrapper(run_ui)
     except KeyboardInterrupt:
