@@ -147,3 +147,35 @@ The current model produces only a binary score; it does not distinguish these
 labels. The additional labels let future models and evaluations separate
 commercials from pauses and sponsored coverage without muting those categories
 by default.
+
+In late October 2026 we recorded live broadcasts from the app's own sources:
+four NBA games, one college football game, one NHL game, and the first 25 to
+30 minutes of ESPN, ESPN2, NFL Network, NBA TV and NHL Network. We labeled them
+by eye every four to six seconds with the `studio` and `bench` labels separated
+from game coverage. A MobileNetV3 model was trained twice, holding out a
+different set of whole broadcasts each time. The table counts held-out samples
+every two seconds that the playback decision muted:
+
+| Held-out broadcast | Paid ads muted | Game coverage | Studio | Bench | Promos |
+|---|---|---|---|---|---|
+| NHL, regional (Jets at Panthers) | 410/708 | 0/2119 | 0/120 | 0/165 | 1/104 |
+| NHL, same game, third period | none labeled | 0/956 | none | 0/89 | 0/7 |
+| NBA, regional (Rockets at Mavericks) | none labeled | 0/1986 | 0/14 | 0/529 | 11/131 |
+| NBA, regional (Knicks at 76ers) | none labeled | 12/3337 | 0/96 | 13/1032 | 3/39 |
+| College football, ESPN (Baylor at UCF) | 594/1422 | 1/3717 | 3/253 | 0/72 | 28/140 |
+| NFL Network game replay | 71/179 | 0/427 | none | 0/50 | 13/77 |
+| ESPN SportsCenter | 153/183 | 0/221 | 28/140 | 3/8 | 31/51 |
+
+On the NHL game, scored every six seconds, the original NBA model muted 233 of
+239 paid-ad samples, but also 55 of 708 game coverage, 3 of 40 studio, 5 of 56
+bench and 30 of 49 sponsor-overlay samples. The new model trades missed
+commercials for far fewer false mutes; it catches about half of each break,
+usually the middle. Nearly all of its SportsCenter false mutes were one analyst
+on a video call from his home, which looks like a commercial; remote and
+at-home studio shots from networks it has not seen remain the main risk. The
+NBA streams showed the arena feed during breaks instead of commercials, so NBA
+ad detection rests on NBA TV, ESPN and replay examples. The installed model
+covers the NBA, NHL, NFL and college football; EPL and WNBA stills were used in
+training but those leagues stay disabled because no held-out ads were measured
+for them. These are correlated samples from a few networks on two days, not a
+field accuracy estimate.

@@ -30,7 +30,7 @@ import sys
 import tempfile
 import time
 
-from sportscli import ai_ad_mute
+from sportscli import ai_ad_mute, app
 from sportscli.tools import evaluate_ads
 
 TEACHER_SIZE = (200, 320)        # the original model's input, height x width
@@ -263,7 +263,8 @@ def main(argv=None):
     export(model, sample, args.output)
     size, latency = args.output.stat().st_size, benchmark(args.output)
     print(f'Wrote {args.output} ({size / 1e6:.2f} MB, {latency:.1f} ms per frame on this machine).')
-    metadata = {'leagues': sorted({r['league'] for r in train_set}), 'input': list(STUDENT_SIZE),
+    # Channel recordings such as 'tv' add coverage and ads but are not leagues the app can enable.
+    metadata = {'leagues': sorted({r['league'] for r in train_set} & set(app.LEAGUES)), 'input': list(STUDENT_SIZE),
                 'broadcasts': sorted({r['broadcast'] for r in train_set}), 'holdout': sorted({r['broadcast'] for r in held}),
                 'size_bytes': size, 'ms_per_frame': round(latency, 1)}
     if held:
