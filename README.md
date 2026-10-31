@@ -6,38 +6,50 @@ Live schedules cover NBA, WNBA, NFL, NCAA football, men's and women's NCAA baske
 
 ## Install
 
-You need Python 3.9+ with `curses`, Git, and a player. Node.js 20+ and npm are needed for the optional PPV resolver installed by `setup.sh`.
-
-**macOS** — install mpv and Node with Homebrew:
+On a Mac or Linux computer, open **Terminal**, paste this line, and press Enter:
 
 ```sh
-brew install mpv node
+curl -fsSL https://raw.githubusercontent.com/osiddiki/sports-cli/main/install.sh | sh
 ```
 
-For a native graphical player, also install [IINA](https://iina.io/):
+Then open a new Terminal window and type `sports`. On Ubuntu, if Terminal says `curl: command not found`, run `sudo apt install curl` first.
+
+The installer lists what it will add and waits for Enter before changing anything. It installs only what is missing:
+
+- **mpv**, the video player.
+- **Python** 3.9 or newer, if the computer has none.
+- **Homebrew**, the standard Mac package installer, on a Mac without it. It asks for your Mac password.
+- On Linux, mpv and Python come from your package manager, so it may ask for your password.
+
+The app goes in `~/.local/share/sports-cli` and the `sports` command in `~/.local/bin`; the installer adds that folder to your shell's `PATH` if needed. It never installs Node.js unless you ask for PPV sources.
+
+| Command | Does |
+| --- | --- |
+| `sports` | Start the app |
+| `sports --update` | Download the latest version; your settings stay |
+| `sports --setup` | Install anything missing again, such as mpv |
+| `sports --setup-ppv` | Add PPV sources: installs Node.js and the PPV resolver |
+
+If something is missing while you use the app, the status line names the command that fixes it. Windows needs [WSL](https://aka.ms/wsl): install it, open Ubuntu, and run the same line there.
+
+### Manual setup
+
+For development, or to choose each piece yourself, you need Python 3.9+ with `curses`, Git, and a player. Node.js 20+ and npm are needed only for the optional PPV resolver.
+
+**macOS:** `brew install mpv node`, and optionally `brew install --cask iina` for [IINA](https://iina.io/), a native graphical player.
+
+**Ubuntu / Debian:** `sudo apt install git python3 mpv nodejs npm`. Check `node --version`; if it is below 20, install a newer version from [Node.js](https://nodejs.org/). For a graphical player, optionally install [Celluloid](https://celluloid-player.github.io/) with `sudo apt install celluloid`. Other Linux distributions can use their own package manager.
+
+**Then:**
 
 ```sh
-brew install --cask iina
-```
-
-**Ubuntu / Debian** — install the dependencies:
-
-```sh
-sudo apt install git python3 mpv nodejs npm
-```
-
-Check `node --version`; if it is below 20, install a newer version from [Node.js](https://nodejs.org/). For a graphical player, optionally install [Celluloid](https://celluloid-player.github.io/) with `sudo apt install celluloid`. Other Linux distributions can use their own package manager. Windows requires a terminal with Python's curses support, such as WSL.
-
-**Then, on either system:**
-
-```sh
-git clone https://github.com/osiddiki/nba-tui.git
-cd nba-tui
+git clone https://github.com/osiddiki/sports-cli.git
+cd sports-cli
 ./setup.sh
 ./sports-cli
 ```
 
-The setup script installs a pinned copy of the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) in `resolver/` and, when pip is available, [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) for faster typo matching and [Rich](https://github.com/Textualize/rich) for download progress in `.deps/`. You can run `./sports-cli` without setup; built-in search and progress displays still work, and PPV sources need the resolver. To update an existing checkout later, run `git pull` and then `./sports-cli`; rerun `./setup.sh` to install or update the optional packages.
+The setup script installs a pinned copy of the [PPV HLS resolver](https://github.com/Lunatic16/ppv-hls-proxy) in `resolver/` when Node.js 20+ is available, and, when pip is available, [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) for faster typo matching and [Rich](https://github.com/Textualize/rich) for download progress in `.deps/`. You can run `./sports-cli` without setup; built-in search and progress displays still work, and PPV sources need the resolver. To update a checkout later, run `git pull` and then `./sports-cli`; rerun `./setup.sh` to install or update the optional packages.
 
 ## First run
 

@@ -693,6 +693,12 @@ def iina_command(executable, url, headers=None, *, cache=15):
     return cmd
 
 
+def setup_hint(problem, option, otherwise):
+    """How to fix a missing piece: the installer's command when it installed the app, else the manual message."""
+    command = os.environ.get('SPORTS_CLI_COMMAND')
+    return f'{problem}. Quit and run: {command} {option}' if command else otherwise
+
+
 def find_celluloid():
     return shutil.which('celluloid') if sys.platform.startswith('linux') else None
 
@@ -1939,10 +1945,9 @@ class App:
                 if not directory:
                     raise DependencyError('Set up the resolver and press d to select its folder; see README.')
                 entry = pathlib.Path(directory).expanduser() / 'src/server.js'
-                if not entry.is_file() or not (entry.parent.parent / 'node_modules').is_dir():
-                    raise DependencyError('Resolver or dependencies missing; see README.')
-                if not shutil.which('node'):
-                    raise DependencyError('Node.js is required for the resolver.')
+                if not entry.is_file() or not (entry.parent.parent / 'node_modules').is_dir() or not shutil.which('node'):
+                    raise DependencyError(setup_hint('PPV sources need a one-time setup', '--setup-ppv',
+                                                     'Resolver, its dependencies or Node.js missing; see README.'))
                 env = os.environ.copy(); env.update({'HOST':'127.0.0.1', 'PORT':'38765', 'NODE_USE_ENV_PROXY':'1'})
                 self.helper = subprocess.Popen(['node', str(entry.resolve())], cwd=str(entry.parent.parent), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.resolver_owned = True
@@ -2025,7 +2030,7 @@ class App:
         if self.player == 'celluloid' and not celluloid:
             self.message = 'Celluloid not found. Install it or press p to switch to mpv.'; return False
         if self.player == 'mpv' and not shutil.which('mpv'):
-            self.message = 'mpv is not installed or not on PATH.'; return False
+            self.message = setup_hint('mpv is not installed', '--setup', 'mpv is not installed or not on PATH.'); return False
         return True
 
     def play(self, feed, *, resolved=None):

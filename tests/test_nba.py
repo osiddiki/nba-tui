@@ -375,6 +375,18 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn('--hwdec=auto-safe', nba.mpv_command('https://example.com/a.m3u8'))
         self.assertIn('--mpv-hwdec=auto-safe', nba.iina_command('/usr/bin/iina-cli', 'https://example.com/a.m3u8'))
 
+    def test_missing_pieces_name_the_installer_command(self):
+        app = nba.App.__new__(nba.App)
+        app.player, app.ai_ad_mute, app.ai_ad_observe = 'mpv', False, False
+        feed = nba.Feed('Example', 'Source', url='https://example.com/a.m3u8', kind='direct')
+        with patch.object(nba.shutil, 'which', return_value=None):
+            with patch.dict(nba.os.environ, {'SPORTS_CLI_COMMAND': 'sports'}):
+                self.assertFalse(app.player_ready(feed))
+                self.assertEqual(app.message, 'mpv is not installed. Quit and run: sports --setup')
+            with patch.dict(nba.os.environ, {}, clear=True):
+                self.assertFalse(app.player_ready(feed))
+                self.assertEqual(app.message, 'mpv is not installed or not on PATH.')
+
     def test_names_match_college_schools_and_soccer_clubs(self):
         def team(display, location, name, short):
             return {'displayName': display, 'location': location, 'name': name, 'shortDisplayName': short}

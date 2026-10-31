@@ -7,13 +7,14 @@ Run the local checks from the repository root:
 ```sh
 python3 -m unittest -v
 python3 -m py_compile sports-cli sportscli/*.py sportscli/tools/*.py
-sh -n setup.sh
+sh -n setup.sh install.sh
 ```
 
 To prove a change in the real app, use the project skill `.claude/skills/verify-sports-cli` (a pseudo-terminal driver with a feature map); `scripts/run_all.sh` drives every mapped feature and needs a network without a sandbox proxy. Run `./sports-cli` in a terminal, or `./sports-cli --list --league nba` for non-interactive output. Live provider tests depend on current games, upstream availability, and network access; keep deterministic fixtures in the unit tests and report which real-player or live checks were possible.
 
 ## Code map
 
+- `install.sh`: the one-command installer for non-developers; it installs only missing pieces (Homebrew, Python, mpv; Node.js only with `--ppv`), unpacks the app into `~/.local/share/sports-cli`, and writes the `sports` launcher, which sets `SPORTS_CLI_COMMAND` so missing-piece messages name `sports --setup` or `sports --setup-ppv`.
 - `sports-cli`: the only user-facing executable; `sportscli/app.py`: schedules, sources, screens, asynchronous discovery, player launch and configuration.
 - `sportscli/smart_search.py`: local query parsing, team suggestions, and result ranking. `sportscli/data/teams.json` is the bundled ESPN team-name index; refresh it with `python3 -m sportscli.tools.update_teams` when appropriate.
 - `sportscli/screens.py`: the screen statechart. `App.handle_key` implements it and `tests/test_screens.py` explores every screen state with every key against it; update the chart and `docs/screens.md` with any navigation change.
