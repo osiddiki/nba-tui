@@ -44,7 +44,7 @@ The setup script installs a pinned copy of the [PPV HLS resolver](https://github
 1. The app opens on Home. Choose Live sports, Replays or Live TV, or press `/` to search across everything. Use `./sports-cli --search` to open directly into search.
 2. Try `stephen curry`, `warriors`, `mavs rockets`, `lakers vs blazers oct 27`, or `tamu vs alabama`. Select a player to see their team's games and replays. Team results are grouped with live broadcasts, up to ten recent replays, and upcoming games. Matching team suggestions follow below. The app checks a relevant team's upcoming schedule and, for specific NBA matchups, searches a few older replay pages in the background.
 3. Use the arrow keys and `Enter` to open a game, a home or away broadcast list, or a replay. Home and away choices appear when a directory identifies those sides; open the live game to see all sources, including unlabeled ones. Replay listings for the same game are grouped; choose a provider, then a server. In search, `Ctrl-U` clears the query, `Ctrl-R` refreshes, and `Esc` goes back.
-4. Select a stream and press `Enter` to play. Resolution runs in the background while you browse; going back or choosing another stream cancels the pending launch. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `h` by home or away broadcast, or `f` to filter sources by name. Press `x` to test a source and `r` to refresh.
+4. Select a stream and press `Enter` to play. Resolution runs in the background while you browse; going back or choosing another stream cancels the pending launch. The stream list shows its provider, broadcast side, listed or measured quality, and availability check. Press `o` to filter by provider, `a` by home or away broadcast, or `f` to filter sources by name. Press `x` to test a source and `r` to refresh.
 5. On macOS, switch between mpv and IINA in Settings (`,`); on Linux, between mpv and Celluloid. The graphical player must be installed first.
 6. To browse archives, press `2` (or choose Replays on Home) and pick a sport. Press `s` in a game, replay or stream list to choose a different sport.
 
@@ -62,22 +62,22 @@ The app opens on **Home**: live sports, replays, live TV, search and settings. E
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` | Live sports, replays, live TV, from anywhere |
+| `1` `2` `3` | Live sports, replays, live TV, from anywhere (inside sports or replays, `1` or `2` changes sport) |
 | `/` | Search teams, players, games, replays and TV channels |
-| `,` | Settings: player, cache, terminal video, backup source, ad breaks, add-on, PPV resolver |
+| `,` | Open or close Settings: player, cache, terminal video, backup source, ad breaks, add-on, PPV resolver |
 | `↑` `↓` (or `j` `k`) | Move |
-| `Enter` or `→` | Open or play |
-| `Esc`, `←` or `Backspace` | Back up one level; repeated, it reaches Home |
+| `Enter`, `→` or `l` | Open or play |
+| `Esc`, `←`, `h` or `Backspace` | Back up one level; repeated, it reaches Home |
 | `s` | Change sport, on a schedule, a replay list or their sources |
 | `f` | Filter the current list (games, replays, channels, sources) |
 | `r` | Refresh the current list |
 | `[` `]` | Previous or next day on a schedule |
 | `x`, `i` | On sources: test the selected source, or show its media URL |
-| `o`, `h`, `g` | On sources: cycle provider, home or away feed (live games), rank by your checks |
+| `o`, `a`, `g` | On sources: cycle provider, home or away feed (live games), rank by your checks |
 | `u` | On sources: play a pasted media URL |
 | `?`, `q` | Help or quit |
 
-In search, letters type into the query: `Esc` goes back, `Ctrl-U` clears and `Ctrl-X` quits. While a stream plays, keys go to mpv (Space pause, `m` mute, `q` back to the app).
+A key that does nothing on the current screen says so on the status line. In search, letters type into the query: `Esc` goes back, `Ctrl-U` clears and `Ctrl-X` quits. While a stream plays, keys go to mpv (Space pause, `m` mute, `q` back to the app).
 
 `./sports-cli --tv` starts on live TV, `./sports-cli --league ncaaf` opens college football directly, and `./sports-cli --league nba --date 2026-10-31` picks a schedule date. `./sports-cli --list --league wnba` prints a plain-text schedule and the first game's streams; `./sports-cli --list --tv` prints the main channels. Run `./sports-cli --help` for all league codes.
 

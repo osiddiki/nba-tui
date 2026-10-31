@@ -37,7 +37,8 @@ check tv-search 'expect:Home' key:/ type:cnbc 'expect:TV CHANNELS' shot:results 
 check tv-sources --app-args="--tv" 'expect:CNN  \(' key:Down key:Enter 'expect:CNBC' 'expect:choices found' wait:8 shot:sources
 check settings 'expect:Home' key:, 'expect:Backup source for live streams' shot:settings key:Down key:Down key:Down key:Enter 'expect:Backup source off' key:Down key:Enter 'expect:During detected ads: break screen' key:Up key:Up key:Up key:Enter 'expect:Cache: 30 seconds' shot:changed key:3 'expect:CNN  \(' key:Enter 'expect:backup: off' 'expect:cache: 30s' shot:sources
 check play-tv --mpv-seconds 8 --app-args="--tv" 'expect:CNN  \(' key:Enter 'expect:choices found' shot:sources key:Enter 'expect:Returned from mpv' shot:returned
-check rep-list 'expect:Home' key:2 'expect:Replays: choose a sport' key:Enter 'expect:replays found' shot:replays key:Enter 'expect:Replay servers from' 'expect:choices found' shot:servers key:Esc 'expect:Replays' shot:back
+check nav-keys --app-args="--league nba" 'expect:NBA  \|' key:1 'expect:choose a sport' key:Esc 'expect:NBA  \|' key:h 'expect:Live sports: choose a sport' key:l 'expect:NBA  \|' key:, 'expect:Backup source' key:, 'expect:NBA  \|' key:z 'expect:z does nothing here' shot:keys
+check rep-list 'expect:Home' key:2 'expect:Replays: choose a sport' key:Enter 'expect:replays found' shot:replays key:Enter 'expect:Replay sources from' 'expect:choices found' shot:sources key:Esc 'expect:Replays' shot:back
 shell_check list-games python3 sports-cli --list --league nba
 shell_check list-tv python3 sports-cli --list --tv
 

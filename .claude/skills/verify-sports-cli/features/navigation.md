@@ -10,6 +10,7 @@ Home, the three sections (live sports, replays, live TV), search, settings and h
 - `nav-help` `?` opens help; Esc returns to the same screen.
 - `nav-search` `/` opens search from anywhere; Esc returns.
 - `nav-date` `[` and `]` change the schedule date.
+- `nav-keys` `1` inside live sports changes sport and Esc comes back; `h`/`l` go back and open; `,` opens and closes settings; an unused key says so.
 
 ## How to get to it (user POV)
 

@@ -9,7 +9,7 @@ Pressing Enter on a source resolves it (through the local relay when needed, wit
 
 ## How to get to it (user POV)
 
-- Enter on a source on the Broadcasts screen.
+- Enter on a source on the Sources screen.
 
 ## Driving it with drive.py
 

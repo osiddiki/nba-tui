@@ -1,6 +1,6 @@
 # Sources and playback settings
 
-The Broadcasts screen for a game or channel: its sources with automatic checks, and the toggles that change how playback works.
+The Sources screen for a game or channel: its sources with automatic checks, and the toggles that change how playback works.
 
 ## Sub-features
 

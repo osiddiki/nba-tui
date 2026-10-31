@@ -8,12 +8,16 @@ same thing on every screen:
 | `1` `2` `3` | Live sports, replays, live TV |
 | `/` | Search teams, players, games and channels |
 | `,` | Settings |
-| Enter or → | Open or play |
-| Esc, ← or Backspace | Back up one level |
+| Enter, → or `l` | Open or play |
+| Esc, ←, `h` or Backspace | Back up one level |
 | `s` | Change sport (schedules, replays and their sources) |
 | `f` | Filter the current list |
 | `r` | Refresh the current list |
 | `?` · `q` | Help · quit |
+| `a` | Home or away feed (live game sources) |
+
+Pressing `?` or `,` on its own screen closes it, and `1` or `2` inside that section changes sport.
+Any other key that does nothing on a screen says so on the status line.
 
 The statechart lives in `sportscli/screens.py`. `tests/test_screens.py` explores every
 reachable screen state with every key (offline, with sample games, replays and channels)
@@ -60,6 +64,7 @@ stateDiagram-v2
     feeds --> origin_: Esc
     feeds --> leagues: s
     settings --> back_: Esc
+    settings --> back_: ,
     search --> feeds: Enter
     search --> replay_sources: Enter
     search --> back_: Esc

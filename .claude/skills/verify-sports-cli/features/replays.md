@@ -1,11 +1,11 @@
 # Replays
 
-Recent full-game replays from each league's archives, and the servers listed for one replay.
+Recent full-game replays from each league's archives, and the sources listed for one replay.
 
 ## Sub-features
 
 - `rep-list` `2` (or Replays on Home), then a sport, lists replays; Esc returns to the sport list.
-- `rep-servers` Enter on a replay lists its servers on the Broadcasts screen.
+- `rep-servers` Enter on a replay lists its sources on the Sources screen.
 
 ## How to get to it (user POV)
 
@@ -16,7 +16,7 @@ Recent full-game replays from each league's archives, and the servers listed for
 Preconditions: baseline; network without a proxy.
 
 - **List.** `$D 'expect:Home' key:2 'expect:Replays: choose a sport' key:Enter 'expect:replays found' shot:replays`.
-- **Servers.** Continue with `key:Enter 'expect:Replay servers from' 'expect:choices found' shot:servers`.
+- **Servers.** Continue with `key:Enter 'expect:Replay sources from' 'expect:choices found' shot:sources`.
 - **Back.** `key:Esc 'expect:Replays' key:Esc 'expect:choose a sport'`.
 
 ## Gotchas

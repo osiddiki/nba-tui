@@ -16,7 +16,7 @@ from sportscli import app as nba, replays, screens, tv
 
 KEYS = {'Enter': 10, 'Esc': 27, 'Backspace': 127, 'Tab': 9, 'Space': 32, 'Ctrl-F': 6, 'Ctrl-X': 24,
         'Up': curses.KEY_UP, 'Down': curses.KEY_DOWN, 'Left': curses.KEY_LEFT, 'Right': curses.KEY_RIGHT}
-EXTRA = list('123/,?qhtsrjk[]lfoixgu')
+EXTRA = list('123/,?qhtsrjk[]lfoixgua')
 ALPHABET = sorted({*KEYS, *(k for keys in screens.CHART.values() for k in keys), *EXTRA})
 MAX_DEPTH = 7
 
@@ -68,9 +68,13 @@ def press(app, name):
 
 
 def state(app):
-    """The screen and every history value that decides where later keys lead."""
-    return (app.mode, app.feed_context, app.feed_return, app.search_return, app.help_return,
-            app.league_cancel, app.section, app.settings_return)
+    """The screen and every history value that decides where later keys lead.
+
+    Help and settings set their return screen on entry and read it only while open,
+    so outside them it cannot change where later keys lead."""
+    return (app.mode, app.feed_context, app.feed_return, app.search_return,
+            app.help_return if app.mode == 'help' else None, app.league_cancel, app.section,
+            app.settings_return if app.mode == 'settings' else None)
 
 
 def snapshot(app):
@@ -220,6 +224,7 @@ class ScreenChartTests(unittest.TestCase):
         for before, path in self.paths.items():
             if before[0] in ('search', 'help'): continue
             for key, expected in (('/', 'search'), ('1', 'leagues'), ('2', 'leagues'), ('3', 'channels'), (',', 'settings')):
+                if key == ',' and before[0] == 'settings': continue  # , closes settings
                 app = self.replay(path); press(app, key)
                 self.assertEqual(app.mode, expected, f'{key} from {before[0]}')
             app = self.replay(path)

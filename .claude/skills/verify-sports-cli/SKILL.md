@@ -40,8 +40,8 @@ Every screen takes `1` live sports, `2` replays, `3` live TV, `/` search, `,` se
 | Home | `Home` | `Live sports` | Enter on a row, or its key |
 | Sport list | `Live sports: choose a sport` or `Replays: choose a sport` | that text | Enter, Esc |
 | Schedule | `Games` | `NBA  \|` (league name then a bar) | Enter sources, `s` sport, `[` `]` date, `f` filter, `r` |
-| Sources | `Broadcasts` | `choices found` | Enter play, `x` test, `i` URL, `o` provider, `h` side (live), `f` filter, `g` rank, Esc |
-| Replays | `Replays` | `replays found` | Enter servers, `s` sport, `f` search titles, Esc |
+| Sources | `Sources` | `choices found` | Enter play, `x` test, `i` inspect, `u` paste URL, `a` side (live), `o` source, `f` filter, `g` rank, Esc |
+| Replays | `Replays` | `replays found` | Enter sources, `s` sport, `f` search titles, Esc |
 | Live TV | `Live TV` | `CNN  \(\d+ sources?\)` | Enter sources, `f` filter (prompt), Esc |
 | Search | `Search` | `Search:` | type text; `TV CHANNELS`, `LIVE`, `REPLAYS` groups; Enter, Esc |
 | Settings | `Settings` | `Backup source for live streams` | Up/Down, Enter changes the row, Esc |

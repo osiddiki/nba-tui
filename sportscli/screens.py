@@ -5,9 +5,10 @@ every reachable screen state with every key and fails if the app takes a
 transition this chart does not allow, or if a declared transition is never
 taken. Keep the two in step: change the chart in the same commit as the code.
 
-Every screen except search (where keys type) and help also takes the global
-keys: 1 live sports, 2 replays, 3 live TV, / search, , settings, ? help, q quit.
-They are listed once in GLOBAL rather than on every screen.
+Every screen except search (where keys type) also takes the global keys:
+1 live sports, 2 replays, 3 live TV, / search, , settings, ? help, q quit.
+They are listed once in GLOBAL rather than on every screen. Pressed on their
+own screen, ? and , close it, and 1 or 2 inside that section changes sport.
 
 Targets written in angle brackets are history states:
 
@@ -33,16 +34,16 @@ CHART = {
     'channels': {'Enter': {'feeds'}, 'Esc': {HOME}},
     'replay_sources': {'Enter': {'feeds'}, 'Esc': {'search'}},
     'feeds': {'Esc': {'<origin>'}, 's': {'leagues'}},
-    'settings': {'Esc': {'<back>'}},
+    'settings': {'Esc': {'<back>'}, ',': {'<back>'}},
     'search': {'Enter': {'feeds', 'replay_sources'}, 'Esc': {'<back>', HOME}, 'Ctrl-X': {EXIT}},
     'help': {'Esc': {'<back>'}, '?': {'<back>'}, 'q': {EXIT}},
 }
 for _screen, _keys in CHART.items():
-    if _screen not in ('search', 'help'):
+    if _screen != 'search':
         for _key, _targets in GLOBAL.items(): _keys.setdefault(_key, _targets)
 
 # Keys that mean the same thing as the named key on every screen except search.
-ALIASES = {'Esc': ('Backspace', 'Left'), 'Enter': ('Right',)}
+ALIASES = {'Esc': ('Backspace', 'Left', 'h'), 'Enter': ('Right', 'l')}
 
 # Transitions the offline exploration cannot take because they need live data:
 # a search result opens a game, replay or replay bundle.
