@@ -65,6 +65,8 @@ if [ "$ADS" = 1 ]; then ADS_PYTHON=$(ads_python || true); fi
 needs=''
 [ -n "$PYTHON" ] || needs="$needs Python,"
 has mpv || needs="$needs mpv (the video player),"
+# Linux distributions package pip separately; it adds faster search and download progress.
+if [ "$OS" = linux ] && { [ -z "$PYTHON" ] || ! "$PYTHON" -m pip --version >/dev/null 2>&1; }; then needs="$needs pip,"; PIP=1; else PIP=0; fi
 if [ "$PPV" = 1 ]; then has node || needs="$needs Node.js (for PPV sources),"; fi
 if [ "$ADS" = 1 ] && [ -z "$ADS_PYTHON" ]; then needs="$needs Python 3.12 (for the ad detector),"; fi
 if [ "$OS" = mac ] && [ -n "$needs" ] && ! has brew; then needs=" Homebrew (the Mac package installer),$needs"; fi
@@ -102,6 +104,10 @@ if [ -z "$PYTHON" ]; then
   if [ "$OS" = mac ]; then run brew install python; else linux_install python3; fi
   PYTHON=$(find_python || true)
   [ -n "$PYTHON" ] || [ "${SPORTS_CLI_DRY_RUN:-0}" = 1 ] || fail 'Python 3.9 or newer with curses could not be found after installing it.'
+fi
+if [ "$PIP" = 1 ]; then
+  say 'Installing pip'
+  if has pacman; then linux_install python-pip; else linux_install python3-pip; fi
 fi
 if ! has mpv; then
   say 'Installing mpv'
