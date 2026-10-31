@@ -354,6 +354,11 @@ class DiscoveryTests(unittest.TestCase):
         self.assertFalse(any('Bad' in x or 'Unsafe' in x for x in command))
         self.assertEqual(command[-2:], ['--', 'https://example.com/a.m3u8'])
 
+    def test_players_decode_video_in_hardware(self):
+        # 1080p60 dropped about 8 frames a second when decoded in software.
+        self.assertIn('--hwdec=auto-safe', nba.mpv_command('https://example.com/a.m3u8'))
+        self.assertIn('--mpv-hwdec=auto-safe', nba.iina_command('/usr/bin/iina-cli', 'https://example.com/a.m3u8'))
+
     def test_names_match_college_schools_and_soccer_clubs(self):
         def team(display, location, name, short):
             return {'displayName': display, 'location': location, 'name': name, 'shortDisplayName': short}
@@ -499,6 +504,31 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual([s.url for s in servers], ['https://video.example/e/abc','https://video.example/e/xyz'])
         self.assertEqual(servers[0].referer, items[0].url)
         self.assertTrue(servers[1].label.startswith('Full Match'))
+
+    def test_recent_replays_cover_several_archive_pages(self):
+        pages = {'https://basketball-video.com/2026-27': '<a href="/a">Bulls vs Heat NBA October 29, 2026</a>',
+                 'https://basketball-video.com/2026-27?page2': '<a href="/b">Lakers vs Jazz NBA October 27, 2026</a>'
+                                                              '<a href="/a">Bulls vs Heat NBA October 29, 2026</a>',
+                 'https://basketball-video.com/2026-27?page3': '<a href="/c">Knicks vs Nets NBA October 25, 2026</a>'}
+        def fetch(url, **kwargs):
+            if url not in pages: raise OSError('gone')  # a later page failing keeps what loaded
+            return pages[url], url
+        with patch.object(providers, 'fetch_html', side_effect=fetch):
+            items = replays.recent(('Basketball Video', 'https://basketball-video.com/2026-27', 'nba'))
+            self.assertEqual([i.url.rsplit('/', 1)[1] for i in items], ['a', 'b', 'c'])
+            # Sites without numbered pages are read once rather than repeating page one.
+            with patch.object(replays, 'listing', return_value=[]) as listing:
+                replays.recent(('WatchReplay', 'https://watchreplay.net/category/nhl/', 'nhl'))
+            self.assertEqual(listing.call_count, 1)
+
+    def test_replays_from_both_archives_list_newest_first(self):
+        app = nba.App(None, {})
+        app.mode = 'replays'; app.replay_generation = 1; app.replay_pending = 2
+        app.replay_order = ['Basketball Replays', 'Basketball Video']
+        app.replay_queue.put((1, 'Basketball Replays', [replays.Replay('Basketball Replays', 'Suns vs Kings NBA October 26, 2026', 'u1')], None))
+        app.replay_queue.put((1, 'Basketball Video', [replays.Replay('Basketball Video', 'Bulls vs Heat NBA October 29, 2026', 'u2')], None))
+        app.poll_replays()
+        self.assertEqual([r.url for r in app.replays], ['u2', 'u1'])
 
     def test_replay_player_api_produces_public_media_url(self):
         payload = b'{"streaming_url":"https://media.example/video/master.m3u8"}'

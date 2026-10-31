@@ -1,6 +1,7 @@
 """Browse replay catalogs and resolve their listed servers on demand."""
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
 import re
 import urllib.parse
@@ -95,6 +96,33 @@ def listing(spec, query=''):
         seen.add(url); results.append(Replay(name, title, url))
         if len(results) == 80: break
     return results
+
+
+PAGED_HOSTS = ('basketballreplays.net', 'basketball-video.com', 'nfl-video.com')
+RECENT_PAGES = 4  # about a week of NBA games across both archives
+
+
+def page_spec(spec, number):
+    """The catalog's Nth listing page, or None when the site has no numbered pages."""
+    name, base, category = spec
+    if number == 1: return spec
+    if urllib.parse.urlsplit(base).hostname not in PAGED_HOSTS: return None
+    separator = '&' if urllib.parse.urlsplit(base).query else '?'
+    return (name, f'{base}{separator}page{number}', category)
+
+
+def recent(spec, pages=RECENT_PAGES):
+    """The first listing pages fetched together; one page holds only a night or two of games."""
+    specs = [page for page in (page_spec(spec, n) for n in range(1, pages+1)) if page]
+    with concurrent.futures.ThreadPoolExecutor(len(specs)) as pool:
+        futures = [pool.submit(listing, page) for page in specs]
+        first = futures[0].result()  # the first page's failure is the catalog's failure
+        later = []
+        for future in futures[1:]:
+            try: later += future.result()
+            except (OSError, ValueError): pass
+    seen = set()
+    return [item for item in first + later if not (item.url in seen or seen.add(item.url))]
 
 
 class _Servers(HTMLParser):

@@ -349,8 +349,8 @@ def search_replay_pages(spec, team, opponent='', date=None, canceled=lambda: Fal
     found, seen = [], set()
     for page in range(2, 7):
         if canceled(): raise concurrent.futures.CancelledError()
-        separator = '&' if urllib.parse.urlsplit(spec[1]).query else '?'
-        page_spec = (spec[0], spec[1] + separator + f'page{page}', spec[2])
+        page_spec = replays.page_spec(spec, page)
+        if not page_spec: break
         items = replays.listing(page_spec)
         for item in items:
             title = smart_search.normalize(item.title)
@@ -650,7 +650,8 @@ STALL_OPTIONS = ('cache-pause-wait=2', 'network-timeout=20')
 
 
 def mpv_command(url, headers=None, *, cache=15, terminal_video=False):
-    cmd = ['mpv', '--no-ytdl', '--force-window=yes', '--title=Sports CLI', '--demuxer-lavf-o=' + HLS_OPTIONS, '--cache=yes', f'--cache-secs={cache}', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=' + str(cache)]
+    # Software decoding drops about 8 frames a second of 1080p60 on an M2 Air; hardware decoding drops none.
+    cmd = ['mpv', '--no-ytdl', '--force-window=yes', '--title=Sports CLI', '--hwdec=auto-safe', '--demuxer-lavf-o=' + HLS_OPTIONS, '--cache=yes', f'--cache-secs={cache}', '--demuxer-max-bytes=256MiB', '--demuxer-readahead-secs=' + str(cache)]
     cmd.extend('--' + option for option in STALL_OPTIONS)
     if terminal_video:
         cmd.append('--vo=tct')
@@ -673,7 +674,7 @@ def find_iina():
 
 def iina_command(executable, url, headers=None, *, cache=15):
     cmd = [executable, '--no-stdin', '--mpv-ytdl=no', '--mpv-force-media-title=Sports CLI',
-           '--mpv-cache=yes', f'--mpv-cache-secs={cache}', '--mpv-demuxer-max-bytes=256MiB',
+           '--mpv-hwdec=auto-safe', '--mpv-cache=yes', f'--mpv-cache-secs={cache}', '--mpv-demuxer-max-bytes=256MiB',
            '--mpv-demuxer-lavf-o=' + HLS_OPTIONS, *('--mpv-' + option for option in STALL_OPTIONS)]
     fields = []
     for name, value in (headers or {}).items():
@@ -1660,7 +1661,7 @@ class App:
         self.message = 'Searching replay catalogs...' if specs else 'No replay catalog configured for this league.'
         for spec in specs:
             def worker(spec=spec, query=self.replay_search):
-                try: items = replays.listing(spec, query)
+                try: items = replays.listing(spec, query) if query else replays.recent(spec)
                 except Exception as exc: self.replay_queue.put((generation, spec[0], [], type(exc).__name__)); return
                 if query:
                     # Archive site searches return only recent games; older ones sit on later pages.
@@ -1687,7 +1688,9 @@ class App:
             selected = self.replays[self.ri] if self.replay_selection_touched and self.ri < len(self.replays) else None
             self.replay_sections[name] = items
             self.replay_pending = max(0, self.replay_pending-1)
-            self.replays = [item for source in self.replay_order for item in self.replay_sections.get(source, [])]
+            # Newest first across archives; titles without a date keep their archive's order at the end.
+            self.replays = sorted((item for source in self.replay_order for item in self.replay_sections.get(source, [])),
+                                  key=lambda item: smart_search.replay_date(item.title) or dt.date.min, reverse=True)
             self.ri = self.replays.index(selected) if selected in self.replays else min(self.ri, max(0, len(self.replays)-1))
             if error: self.replay_errors.append(f'{name}: {error}')
             changed = True
