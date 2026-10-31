@@ -121,6 +121,47 @@ class MergeTest(unittest.TestCase):
         finally:
             server.close()
 
+    def test_relay_follows_a_mirror_when_the_active_source_segments_fail(self):
+        server = relay.Relay()
+        def fetch(url, *args, **kwargs):
+            if url.endswith('.m3u8'): return ('\n'.join(['#EXTM3U', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:0'] +
+                                       [f'#EXTINF:2,\nseg-{n:03d}.ts' for n in range(8)]) + '\n').encode()
+            # The primary's playlist keeps advancing while its segments time out.
+            if 'primary' in url: raise TimeoutError('segment timed out')
+            return ts_with_pts(int(url[-6:-3]) * 180000)
+        try:
+            with patch.object(relay, '_download', side_effect=fetch), patch.object(relay.Merged, 'start'):
+                server.add_merged([('https://primary.example/live.m3u8', {}), ('https://mirror.example/live.m3u8', {})])
+                session = next(iter(server.merged.values()))
+                committed = []
+                original = session.timeline.commit
+                session.timeline.commit = lambda i, seg, *a: (committed.append(seg.name), original(i, seg, *a))
+                session.pump()
+                self.assertEqual(session.active, 1)
+                session.pump()
+            self.assertEqual(committed, ['seg-005.ts', 'seg-006.ts', 'seg-007.ts'])
+        finally:
+            server.close()
+
+    def test_relay_does_not_wait_for_a_hung_backup_playlist(self):
+        server = relay.Relay()
+        hung, release = relay.threading.Event(), relay.threading.Event()
+        def fetch(url, *args, **kwargs):
+            if 'backup' in url and hung.is_set(): release.wait(30)
+            return ('\n'.join(['#EXTM3U', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:0'] +
+                              [f'#EXTINF:2,\nseg-{n:03d}.ts' for n in range(8)]) + '\n').encode()
+        try:
+            with patch.object(relay, '_download', side_effect=fetch), patch.object(relay.Merged, 'start'):
+                server.add_merged([('https://primary.example/live.m3u8', {}), ('https://backup.example/live.m3u8', {})])
+                session = next(iter(server.merged.values()))
+                hung.set()
+                started = relay.time.monotonic()
+                session.refresh()
+                self.assertLess(relay.time.monotonic() - started, 1)
+                self.assertTrue(session.healthy(0))
+        finally:
+            release.set(); server.close()
+
 
 class BackupSelectionTest(unittest.TestCase):
     def make_app(self):

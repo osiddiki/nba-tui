@@ -233,6 +233,8 @@ class Merged:
         self.error = None
         self.switches = 0
         self.failed = {}
+        self.loads = {}  # source index -> pending playlist load
+        self.loader = concurrent.futures.ThreadPoolExecutor(max_workers=len(sources))
 
     def fetch(self, url, headers, timeout, limit=MAX_SEGMENT, attempts=2):
         if url.startswith(self.relay.base + '/'):
@@ -284,7 +286,7 @@ class Merged:
             self.requested = time.monotonic(); self.error = None
             self.thread = threading.Thread(target=self.run, daemon=True); self.thread.start()
 
-    def stop(self): self.stopped.set()
+    def stop(self): self.stopped.set(); self.loader.shutdown(wait=False)
 
     def switch(self, reason):
         for offset in range(1, len(self.sources)):
@@ -298,17 +300,29 @@ class Merged:
         while not self.stopped.is_set():
             if time.monotonic() - self.requested > self.IDLE: return
             started = time.monotonic()
-            for index in range(len(self.sources)):
-                try:
-                    playlist = self.load(index)
-                    if index == self.timeline.last_source: self.timeline.observe(index, playlist)
-                except (OSError, ValueError, UnicodeError, urllib.error.URLError):
-                    self.sources[index]['failures'] += 1
+            self.refresh()
             if not self.healthy(self.active): self.switch('stalled')
             progressed = self.pump()
             target = (self.sources[self.active]['playlist'] or merge.Playlist(4, [], False)).target
             if not progressed:
                 self.stopped.wait(max(.5, min(3, target / 2) - (time.monotonic() - started)))
+
+    def refresh(self):
+        """Reload every playlist at once, waiting only for the active one; a hung backup must not hold up playback."""
+        for index in range(len(self.sources)):
+            if index not in self.loads or self.loads[index].done():
+                self.loads[index] = self.loader.submit(self.load, index)
+        playlist = self.sources[self.active]['playlist']
+        # Waiting longer than the stall window would leave the backups' last updates looking stale too.
+        concurrent.futures.wait([self.loads[self.active]], timeout=max(3, 1.5 * playlist.target + .5) if playlist else 8)
+        for index, future in list(self.loads.items()):
+            if not future.done(): continue
+            del self.loads[index]
+            try:
+                playlist = future.result()
+                if index == self.timeline.last_source: self.timeline.observe(index, playlist)
+            except (OSError, ValueError, UnicodeError, urllib.error.URLError):
+                self.sources[index]['failures'] += 1
 
     def alternates(self, segment):
         for index, source in enumerate(self.sources):
@@ -341,9 +355,13 @@ class Merged:
         for segment, discontinuity in plan[:3]:
             timeout = max(4, min(15, segment.duration * 1.5))
             data = prefetched.pop(segment.url, None)
-            for owner, url in ([] if data else [(source, segment.url), *self.alternates(segment)]):
+            owner = source
+            candidates = [] if data else [(source, segment.url), *self.alternates(segment)]
+            for owner, url in candidates:
                 try:
-                    data = _media(self.fetch(url, owner['headers'], timeout))
+                    # One try on the active source when a mirror can serve the same segment.
+                    attempts = 1 if owner is source and len(candidates) > 1 else 2
+                    data = _media(self.fetch(url, owner['headers'], timeout, attempts=attempts))
                     break
                 except (OSError, ValueError, urllib.error.URLError):
                     continue
@@ -368,6 +386,10 @@ class Merged:
                 while self.cache_bytes > self.CACHE_BYTES and len(self.cache) > 1:
                     self.cache_bytes -= len(self.cache.pop(next(iter(self.cache))))
                 self.lock.notify_all()
+            if owner is not source:
+                # The active source's playlist still advances but its segments fail; follow the mirror that served this one.
+                self.active = self.sources.index(owner); self.switches += 1
+                return True
         return bool(plan)
 
     def playlist(self):
