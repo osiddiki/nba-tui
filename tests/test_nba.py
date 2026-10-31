@@ -64,6 +64,22 @@ class DiscoveryTests(unittest.TestCase):
                           event('unknown',{})]}
         self.assertEqual({g.id for g in nba.games_from_espn(data,league='wnba')}, {'delayed','live','unknown'})
 
+    def test_today_includes_late_games_still_live_from_yesterday(self):
+        def event(ident, date, state):
+            return {'id': ident, 'date': date, 'name': 'Lakers at Warriors', 'status': {'type': {'state': state}},
+                    'competitions': [{'competitors': [
+                        {'homeAway': 'home', 'team': {'name': 'Warriors', 'displayName': 'Golden State Warriors'}},
+                        {'homeAway': 'away', 'team': {'name': 'Lakers', 'displayName': 'Los Angeles Lakers'}}]}]}
+        boards = {'20261030': {'events': [event('late', '2026-10-31T02:00Z', 'in'), event('early', '2026-10-30T23:00Z', 'post'),
+                                          event('pending', '2026-10-30T23:30Z', 'pre')]},
+                  '20261031': {'events': [event('tonight', '2026-10-31T23:00Z', 'pre')]}}
+        fetch = lambda url, **kwargs: boards[url.split('dates=')[1][:8]]
+        today = dt.date(2026, 10, 31)
+        with patch.object(nba, 'request', side_effect=fetch), patch.object(nba, 'default_day', return_value=today):
+            self.assertEqual([g.id for g in nba.get_games(today)], ['late', 'tonight'])
+            # A chosen past or future date shows only that date.
+            self.assertEqual([g.id for g in nba.get_games(dt.date(2026, 10, 30))], ['pending', 'late'])
+
     def test_fetch_streams_is_game_specific_and_reports_source_failure(self):
         def fetch(url, **kwargs):
             if url == nba.PPV:

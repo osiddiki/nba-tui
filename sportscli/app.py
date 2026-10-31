@@ -329,7 +329,15 @@ def default_day():
 def get_games(day=None, league='nba'):
     day = day or default_day()
     path = LEAGUES[league][1]
-    return games_from_espn(request(f'{ESPN}/{path}/scoreboard?dates={day:%Y%m%d}&limit=300'), league=league)
+    def scoreboard(date):
+        return games_from_espn(request(f'{ESPN}/{path}/scoreboard?dates={date:%Y%m%d}&limit=300'), league=league)
+    games = scoreboard(day)
+    if day != default_day(): return games
+    # Late West Coast games run past midnight Eastern while ESPN keeps them on the previous day.
+    try: earlier = [game for game in scoreboard(day - dt.timedelta(days=1)) if game.state == 'live']
+    except (OSError, ValueError): return games
+    ids = {game.id for game in games}
+    return sorted([game for game in earlier if game.id not in ids] + games, key=lambda game: game.start)
 
 
 def get_team_games(team_id, league, today=None):
