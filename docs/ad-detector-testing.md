@@ -22,8 +22,10 @@ These sample times are illustrative:
 }
 ```
 
-Use `broadcast` for game play, analysis, interviews, and other program coverage;
-`ad` for a full-screen paid commercial; `promo` for network or program
+Use `broadcast` for game play, replays and other program coverage; `studio` for
+studio, desk and booth segments with hosts or analysts on camera; `bench` for
+bench, sideline, crowd and interview shots away from play; `ad` for a full-screen
+paid commercial, including political ads; `promo` for network or program
 promotions; `break` for a quiet break screen or filler with no commercial or
 program coverage; and `overlay` for sponsor graphics or an ad read while game
 or program coverage continues. A timeout with commentary remains `broadcast`;
@@ -49,7 +51,7 @@ python3 -m sportscli.tools.evaluate_ads recording.mp4 labels.json \
 
 The tool samples locally at two-second intervals by default, uses the same
 decision state machine as playback, and reports muted samples separately for
-ads, broadcast coverage, promos, breaks, overlays, and unknown intervals. The JSON report includes
+each label, so false mutes on studio and bench coverage show on their own rows. The JSON report includes
 the actual sampled timestamps, scores, and decisions. No frames are uploaded;
 temporary images are deleted at the end. `--every` changes the interval and
 `--duration` is limited to 30 minutes and 1,800 samples per run.
@@ -89,7 +91,9 @@ Model-generated tags are useful for training but can confuse promos with paid
 ads. To record several live games unattended at training resolution, about 100 MB
 per hour each, run `python3 -m sportscli.tools.record_games ~/ad-data/recordings
 nba:Knicks nhl:Jets` before they start; it waits for each game and stops when
-ESPN marks it finished. Sparse stills, such as one frame every 45 seconds from a replay, need no
+ESPN marks it finished. `tv:ESPN` or `"tv:NFL Network"` with `--hours 3`
+records a channel from the live TV directory right away; sports networks fill
+the night with studio shows and commercials. Sparse stills, such as one frame every 45 seconds from a replay, need no
 video file: list the folder and its `tags.json` as a `frames` entry in the
 manifest. Replay archives usually have commercials cut out, so they add
 coverage, studio and bench examples rather than ads; record live games for

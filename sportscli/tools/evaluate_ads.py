@@ -21,7 +21,8 @@ import time
 from sportscli import ai_ad_mute
 
 
-LABELS = ('ad', 'broadcast', 'promo', 'break', 'overlay', 'unknown')
+# studio and bench are program coverage kept apart so their false mutes can be measured.
+LABELS = ('ad', 'broadcast', 'studio', 'bench', 'promo', 'break', 'overlay', 'unknown')
 
 
 def read_intervals(path):
@@ -123,7 +124,7 @@ def main(argv=None):
         description='Measure ad detection on a local labeled video. No frames are uploaded.',
         epilog=('Manifest JSON: {"intervals": [{"start": 0, "end": 15, "label": "broadcast"}, '
                 '{"start": 15, "end": 45, "label": "ad"}]}. Times are seconds from the start '
-                'of the video. Labels are ad, broadcast, promo, break, overlay, or unknown; gaps are unknown.'))
+                'of the video. Labels are ad, broadcast, studio, bench, promo, break, overlay, or unknown; gaps are unknown.'))
     parser.add_argument('video', type=pathlib.Path, help='local recording, never a URL')
     parser.add_argument('manifest', type=pathlib.Path, help='JSON intervals labeled independently')
     parser.add_argument('--start', type=float, default=0, help='starting position in seconds')
@@ -173,7 +174,7 @@ def main(argv=None):
                 worker.close()
         report.update({'video': args.video.name, 'start': args.start, 'duration': args.duration,
                        'sample_interval': args.every})
-        print('Samples every', args.every, 'seconds; broadcast, promo, break and overlay are kept separate.')
+        print('Samples every', args.every, 'seconds; each label is counted separately.')
         for label in LABELS:
             count = report['counts'][label]
             print(f"{label:9} {count['muted']:4} muted / {count['samples']:4} samples")

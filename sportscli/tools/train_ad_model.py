@@ -35,7 +35,8 @@ from sportscli.tools import evaluate_ads
 
 TEACHER_SIZE = (200, 320)        # the original model's input, height x width
 STUDENT_SIZE = (144, 256)
-TARGETS = {'broadcast': 1.0, 'overlay': 1.0, 'ad': 0.0}
+TARGETS = {'broadcast': 1.0, 'studio': 1.0, 'bench': 1.0, 'overlay': 1.0, 'ad': 0.0}
+COVERAGE = ('broadcast', 'studio', 'bench', 'overlay')
 
 
 def frames(video, start, duration, every, size):
@@ -83,6 +84,8 @@ def load_dataset(manifest, every, teacher, promo, teacher_weight):
     base = manifest.parent
     document = json.loads(manifest.read_text(encoding='utf-8'))
     recordings = []
+    # Without a teacher, decode straight to the student size: hours of video at teacher size do not fit in memory.
+    size = TEACHER_SIZE if teacher else STUDENT_SIZE
     for item in document.get('recordings', []):
         league = str(item.get('league', 'nba'))
         if item.get('frames'):
@@ -90,12 +93,12 @@ def load_dataset(manifest, every, teacher, promo, teacher_weight):
             tags = json.loads((base / item.get('tags', pathlib.Path(item['frames']) / 'tags.json')).read_text(encoding='utf-8'))
             if any(label not in evaluate_ads.LABELS for label in tags.values()): raise ValueError(f'Unknown label in {folder}')
             broadcast = str(item.get('broadcast') or folder.name)
-            images, positions, tagged = still_frames(folder, tags, TEACHER_SIZE)
+            images, positions, tagged = still_frames(folder, tags, size)
         else:
             video = (base / item['video']).resolve()
             intervals = evaluate_ads.read_intervals(base / item['labels']) if item.get('labels') else []
             broadcast = str(item.get('broadcast') or video.stem)
-            images, positions = frames(video, float(item.get('start', 0)), item.get('duration'), every, TEACHER_SIZE)
+            images, positions = frames(video, float(item.get('start', 0)), item.get('duration'), every, size)
             tagged = [evaluate_ads.label_at(intervals, position) for position in positions]
         targets, weights, labels, soft = [], [], [], []
         for image, position, label in zip(images, positions, tagged):
@@ -108,12 +111,13 @@ def load_dataset(manifest, every, teacher, promo, teacher_weight):
                 targets.append(teacher_score); weights.append(teacher_weight)
             else: targets.append(0.5); weights.append(0.0)
             labels.append(label)
-        small = np.stack([np.asarray(Image.fromarray(image).resize(STUDENT_SIZE[::-1], Image.BILINEAR)) for image in images])
+        small = images if size == STUDENT_SIZE else np.stack(
+            [np.asarray(Image.fromarray(image).resize(STUDENT_SIZE[::-1], Image.BILINEAR)) for image in images])
         recordings.append({'broadcast': broadcast, 'league': league, 'images': small,
                            'targets': np.array(targets, 'float32'), 'weights': np.array(weights, 'float32'),
                            'labels': labels, 'positions': positions, 'teacher': soft})
         print(f'{broadcast} ({league}): {len(small)} frames, '
-              f'{sum(1 for l in labels if l == "ad")} ad / {sum(1 for l in labels if l in ("broadcast", "overlay"))} coverage labeled',
+              f'{sum(1 for l in labels if l == "ad")} ad / {sum(1 for l in labels if l in COVERAGE)} coverage labeled',
               flush=True)
     if not recordings: raise SystemExit('The manifest lists no recordings.')
     return recordings
@@ -144,9 +148,11 @@ def build(alpha):
 def train(train_set, epochs, alpha, batch):
     import numpy as np
     import tensorflow as tf
-    images = np.concatenate([r['images'] for r in train_set])
-    targets = np.concatenate([r['targets'] for r in train_set])
-    weights = np.concatenate([r['weights'] for r in train_set])
+    # Unlabeled frames without teacher scores carry no weight; leaving them out saves memory.
+    keep = [r['weights'] > 0 for r in train_set]
+    images = np.concatenate([r['images'][k] for r, k in zip(train_set, keep)])
+    targets = np.concatenate([r['targets'][k] for r, k in zip(train_set, keep)])
+    weights = np.concatenate([r['weights'][k] for r, k in zip(train_set, keep)])
     hard = weights >= 1
     ads, coverage = int(np.sum(hard & (targets < .5))), int(np.sum(hard & (targets >= .5)))
     if not ads or not coverage: raise SystemExit('Training needs labeled ad and coverage frames.')
@@ -262,14 +268,22 @@ def main(argv=None):
                 'size_bytes': size, 'ms_per_frame': round(latency, 1)}
     if held:
         student = scorer(args.output)
-        metadata['student'] = report(held, lambda r: [student(i) for i in r['images']], args.every)
+        for r in held: r['student'] = [student(i) for i in r['images']]
+        student_scores = lambda r: r['student']
+        metadata['student'] = report(held, student_scores, args.every)
         if teacher and all(s is not None for r in held for s in r['teacher']):
             metadata['original'] = report(held, lambda r: r['teacher'], args.every)
+        # Leagues differ in studio and bench coverage, so report each one on its own.
+        metadata['by_league'] = {league: report([r for r in held if r['league'] == league], student_scores, args.every)
+                                 for league in sorted({r['league'] for r in held})}
         print('Held-out mute counts (muted/samples):')
-        for label in ('ad', 'broadcast', 'overlay', 'promo', 'break'):
+        for label in evaluate_ads.LABELS[:-1]:
             row = [f'{name} {metadata[name][label]["muted"]}/{metadata[name][label]["samples"]}'
                    for name in ('student', 'original') if name in metadata]
             print(f'  {label:10} ' + '   '.join(row))
+        for league, counts in metadata['by_league'].items():
+            print(f'  {league}: ' + ', '.join(f'{label} {count["muted"]}/{count["samples"]}'
+                                              for label, count in counts.items() if count['samples']))
     else:
         print('No held-out broadcast: this run cannot estimate accuracy.')
     args.output.with_suffix('.json').write_text(json.dumps(metadata, indent=2) + '\n')

@@ -12,3 +12,10 @@ class TrainingSplitTests(unittest.TestCase):
     def test_misspelled_holdout_cannot_silently_remove_evaluation(self):
         with self.assertRaisesRegex(ValueError, 'Unknown held-out'):
             training.split([{'broadcast': 'game'}], ['typo'])
+
+    def test_studio_and_bench_train_as_coverage_but_report_separately(self):
+        self.assertEqual({training.TARGETS[label] for label in ('studio', 'bench', 'broadcast')}, {1.0})
+        rows = [{'positions': [0, 2, 4], 'labels': ['studio', 'bench', 'ad']}]
+        counts = training.report(rows, lambda _: [1.0, 1.0, 0.0], 2)
+        self.assertEqual((counts['studio']['samples'], counts['bench']['samples']), (1, 1))
+        self.assertEqual(counts['studio']['muted'] + counts['bench']['muted'], 0)
