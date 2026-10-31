@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import threading
@@ -10,6 +11,45 @@ import urllib.parse
 import urllib.request
 
 from . import grading
+
+
+def ipc_path(directory):
+    """Where mpv listens for JSON commands: a named pipe on Windows, a socket in the session folder elsewhere."""
+    if os.name == 'nt': return r'\\.\pipe\sports-mpv-' + os.path.basename(directory)
+    return os.path.join(directory, 'mpv.sock')
+
+
+class Connection:
+    """One mpv JSON IPC connection; raises OSError while mpv is not listening yet."""
+    def __init__(self, path, timeout):
+        if os.name == 'nt':
+            # Commands and replies alternate on one thread, so one unbuffered pipe handle serves both.
+            self.pipe = open(path, 'r+b', buffering=0); self.sock = None
+            self.reader = self.pipe
+        else:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); self.sock.settimeout(timeout)
+            try: self.sock.connect(path)
+            except OSError: self.sock.close(); raise
+            self.reader = self.sock.makefile('rb'); self.pipe = None
+
+    def send(self, data):
+        if self.pipe: self.pipe.write(data)
+        else: self.sock.sendall(data)
+
+    def close(self):
+        if self.pipe: self.pipe.close()
+        else: self.reader.close(); self.sock.close()
+
+
+def connect(path, timeout, stopped, wait=10):
+    """Connect once mpv has started listening, or return None when stopped or out of time."""
+    deadline = time.monotonic() + wait
+    while not stopped.is_set():
+        try: return Connection(path, timeout)
+        except OSError:
+            if time.monotonic() >= deadline: raise
+            stopped.wait(.1)
+    return None
 
 
 def cue_intervals(manifest):
@@ -99,24 +139,17 @@ class Monitor:
         if self.thread.is_alive(): self.thread.join(timeout=2)
 
     def run(self):
-        deadline = time.monotonic()+10
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(.5)
+        connection = None
         try:
-            while not self.stopped.is_set():
-                try: sock.connect(self.path); break
-                except OSError:
-                    if time.monotonic() >= deadline: return
-                    self.stopped.wait(.1)
-            else: return
-            reader = sock.makefile('rb')
+            connection = connect(self.path, .5, self.stopped)
+            if connection is None: return
             request_id = 0
             def command(*args):
                 nonlocal request_id
                 request_id += 1
-                sock.sendall((json.dumps({'command':args,'request_id':request_id})+'\n').encode())
+                connection.send((json.dumps({'command':args,'request_id':request_id})+'\n').encode())
                 while not self.stopped.is_set():
-                    line = reader.readline(100_000)
+                    line = connection.reader.readline(100_000)
                     if not line: raise OSError('mpv disconnected')
                     response = json.loads(line)
                     if response.get('request_id') == request_id:
@@ -134,4 +167,4 @@ class Monitor:
         except (OSError, ValueError, json.JSONDecodeError):
             pass
         finally:
-            sock.close()
+            if connection: connection.close()

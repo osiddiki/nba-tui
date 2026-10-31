@@ -6,13 +6,19 @@ Live schedules cover NBA, WNBA, NFL, NCAA football, men's and women's NCAA baske
 
 ## Install
 
-On a Mac or Linux computer, open **Terminal**, paste this line, and press Enter:
+On a **Mac or Linux** computer, open **Terminal**, paste this line, and press Enter:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/osiddiki/sports-cli/main/install.sh | sh
 ```
 
-Then open a new Terminal window and type `sports`. On Ubuntu, if Terminal says `curl: command not found`, run `sudo apt install curl` first.
+On **Windows** 10 or 11, open **PowerShell** from the Start menu, paste this line, and press Enter:
+
+```powershell
+irm https://raw.githubusercontent.com/osiddiki/sports-cli/main/install.ps1 | iex
+```
+
+Then open a new terminal window and type `sports`. On Ubuntu, if Terminal says `curl: command not found`, run `sudo apt install curl` first. On Windows, [Windows Terminal](https://aka.ms/terminal) shows the app best; it comes with Windows 11.
 
 The installer lists what it will add and waits for Enter before changing anything. It installs only what is missing:
 
@@ -20,8 +26,9 @@ The installer lists what it will add and waits for Enter before changing anythin
 - **Python** 3.9 or newer, if the computer has none.
 - **Homebrew**, the standard Mac package installer, on a Mac without it. It asks for your Mac password.
 - On Linux, mpv and Python come from your package manager, so it may ask for your password.
+- On Windows, Python and mpv come from winget, the package installer built into Windows. Without winget, install "App Installer" from the Microsoft Store first.
 
-The app goes in `~/.local/share/sports-cli` and the `sports` command in `~/.local/bin`; the installer adds that folder to your shell's `PATH` if needed. It never installs Node.js unless you ask for PPV sources.
+On a Mac or Linux the app goes in `~/.local/share/sports-cli` and the `sports` command in `~/.local/bin`; on Windows both go in `%LOCALAPPDATA%\sports-cli`. The installer adds the command's folder to your `PATH` if needed. It never installs Node.js or the ad detector unless you ask for them.
 
 | Command | Does |
 | --- | --- |
@@ -29,8 +36,9 @@ The app goes in `~/.local/share/sports-cli` and the `sports` command in `~/.loca
 | `sports --update` | Download the latest version; your settings stay |
 | `sports --setup` | Install anything missing again, such as mpv |
 | `sports --setup-ppv` | Add PPV sources: installs Node.js and the PPV resolver |
+| `sports --setup-ads` | Add the local ad detector, including a Python it supports |
 
-If something is missing while you use the app, the status line names the command that fixes it. Windows needs [WSL](https://aka.ms/wsl): install it, open Ubuntu, and run the same line there.
+If something is missing while you use the app, the status line names the command that fixes it.
 
 ### Manual setup
 
@@ -140,12 +148,14 @@ Most live streams tested do not include these markers, and this setting does not
 For an **experimental local AI detector for NBA broadcasts**, install it separately, then opt in for each run:
 
 ```sh
-./sports-cli --install-ad-model   # one-time optional download
-./sports-cli --ai-ad-observe      # show predictions, keep audio unchanged
-./sports-cli --ai-ad-mute         # enable for this run
+sports --setup-ads       # one-time optional setup
+sports --ai-ad-observe   # show predictions, keep audio unchanged
+sports --ai-ad-mute      # enable for this run
 ```
 
-The install downloads the original 150 MB model and conversion packages, verifies its checksum, and quantizes it locally. The model download shows byte progress; the later install and conversion steps show an activity indicator because their total time is unknown. Allow about 1.5 GB of temporary disk space during installation. It removes the source model and conversion environment afterward, leaving the 22 MB model and an isolated runtime in `${XDG_DATA_HOME:-~/.local/share}/sports-live/ad-mute/`. On Linux and Apple Silicon, the finished installation takes roughly 200 MB, depending on Python and platform. Intel Macs use a larger TensorFlow runtime. Setup needs Python 3.9–3.12 with `venv` and pip; on Ubuntu/Debian, install `python3-venv` if needed. If the app runs on a newer Python, it searches for a compatible version. The normal launcher never installs the model automatically, and the Git checkout contains no model weights.
+`sports --setup-ads` installs a Python the conversion tools support when the computer has none (Python 3.12 from Homebrew, your Linux package manager or winget), then runs the detector setup. From a Git checkout, run `./sports-cli --install-ad-model` instead. If setup is interrupted, running it again starts over cleanly.
+
+The install downloads the original 150 MB model and conversion packages, verifies its checksum, and quantizes it locally. The model download shows byte progress; the later install and conversion steps show an activity indicator because their total time is unknown. Allow about 1.5 GB of temporary disk space during installation. It removes the source model and conversion environment afterward, leaving the 22 MB model and an isolated runtime in `${XDG_DATA_HOME:-~/.local/share}/sports-live/ad-mute/` (on Windows, `%USERPROFILE%\.local\share\sports-live\ad-mute`). On Linux and Apple Silicon, the finished installation takes roughly 200 MB, depending on Python and platform. Intel Macs use a larger TensorFlow runtime. Setup needs Python 3.9–3.12 (3.10–3.12 on Windows) with `venv` and pip. If the app runs on a newer Python, it searches for a compatible version. The normal launcher never installs the model automatically, and the Git checkout contains no model weights.
 
 This detector samples video frames locally in mpv and sends nothing to an AI service. It was trained for NBA video and is disabled for other leagues. Try `--ai-ad-observe` first: it shows predictions without muting. In tests with real NBA broadcasts and commercials, the detector also classified some studio and bench coverage as ads. Automatic muting is experimental and may silence game coverage; use mpv's `m` key to override it; unmuting also ends the break screen and corner preview until coverage returns. The model is a quantized version of the MIT-licensed [NBA-redzone-ML model](https://huggingface.co/plt3/NBA-redzone-ML), and the project describes its original training and evaluation [here](https://github.com/plt3/NBA-redzone-ML).
 

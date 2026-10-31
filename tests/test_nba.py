@@ -1,4 +1,8 @@
 import datetime as dt
+import os
+import pathlib
+import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from sportscli import app as nba, providers, relay
@@ -386,6 +390,13 @@ class DiscoveryTests(unittest.TestCase):
             with patch.dict(nba.os.environ, {}, clear=True):
                 self.assertFalse(app.player_ready(feed))
                 self.assertEqual(app.message, 'mpv is not installed or not on PATH.')
+
+    def test_settings_save_on_windows_without_posix_modes(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(nba, 'CONFIG', pathlib.Path(root) / 'config.json'), \
+             patch.object(nba, 'os', SimpleNamespace(name='nt', open=os.open, fdopen=os.fdopen, O_WRONLY=os.O_WRONLY,
+                                                     O_CREAT=os.O_CREAT, O_TRUNC=os.O_TRUNC)):
+            nba.save_config({'player': 'mpv'})
+            self.assertEqual(nba.load_config(), {'player': 'mpv'})
 
     def test_names_match_college_schools_and_soccer_clubs(self):
         def team(display, location, name, short):

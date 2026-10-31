@@ -104,7 +104,8 @@ def load_config():
 def save_config(config):
     CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.fchmod(fd, 0o600)
+    # Windows keeps files private to the user's profile and has no POSIX modes to set.
+    if os.name != 'nt': os.fchmod(fd, 0o600)
     with os.fdopen(fd, 'w') as f:
         json.dump(config, f, indent=2)
 
@@ -693,10 +694,11 @@ def iina_command(executable, url, headers=None, *, cache=15):
     return cmd
 
 
-def setup_hint(problem, option, otherwise):
+def setup_hint(problem, option, otherwise, *, running=True):
     """How to fix a missing piece: the installer's command when it installed the app, else the manual message."""
     command = os.environ.get('SPORTS_CLI_COMMAND')
-    return f'{problem}. Quit and run: {command} {option}' if command else otherwise
+    if not command: return otherwise
+    return f'{problem}. {"Quit and run" if running else "Run"}: {command} {option}'
 
 
 def find_celluloid():
@@ -2022,7 +2024,7 @@ class App:
         if (self.ai_ad_mute or self.ai_ad_observe) and self.player != 'mpv':
             self.message = 'AI ad detection requires mpv. Press p to switch players.'; return False
         if (self.ai_ad_mute or self.ai_ad_observe) and not ai_ad_mute.installed():
-            self.message = 'AI detector not installed. Run ./sports-cli --install-ad-model.'; return False
+            self.message = setup_hint('AI detector not installed', '--setup-ads', 'AI detector not installed. Run ./sports-cli --install-ad-model.'); return False
         iina = find_iina() if self.player == 'iina' else None
         celluloid = find_celluloid() if self.player == 'celluloid' else None
         if self.player == 'iina' and not iina:
@@ -2098,8 +2100,9 @@ class App:
             ad_note += f' Recording to {self.record_dir}.'
         if intervals or ai_active:
             try:
-                temporary = tempfile.TemporaryDirectory(prefix='sports-mpv-', dir='/tmp')
-                socket_path = os.path.join(temporary.name, 'mpv.sock')
+                # A short /tmp path keeps the socket under the Unix path-length limit.
+                temporary = tempfile.TemporaryDirectory(prefix='sports-mpv-', dir=None if os.name == 'nt' else '/tmp')
+                socket_path = ad_mute.ipc_path(temporary.name)
                 on_break, preview = self.break_handler() if ai_active and self.ai_ad_mute else (None, None)
                 monitor = (ai_ad_mute.Monitor(socket_path, temporary.name, mute=self.ai_ad_mute, on_break=on_break)
                            if ai_active else ad_mute.Monitor(socket_path, intervals))
@@ -2676,7 +2679,8 @@ def main():
             print(f'Cannot use recording folder: {exc}', file=sys.stderr); return 2
     if args.install_ad_model: return ai_ad_mute.install()
     if (args.ai_ad_mute or args.ai_ad_observe) and not ai_ad_mute.installed():
-        print('AI ad detector not installed. Run ./sports-cli --install-ad-model first.', file=sys.stderr)
+        print(setup_hint('AI ad detector not installed', '--setup-ads', 'AI ad detector not installed. Run ./sports-cli --install-ad-model first.',
+                         running=False), file=sys.stderr)
         return 2
     if args.addon: config['addon'] = args.addon
     if args.resolver_dir: config['resolver_dir'] = args.resolver_dir

@@ -7,9 +7,8 @@ import math
 import os
 import pathlib
 import platform
-import select
+import queue
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -18,6 +17,7 @@ import time
 import urllib.request
 from . import progress
 
+from . import ad_mute
 from .ad_mute import MuteState
 
 
@@ -34,11 +34,16 @@ def installation_dir():
     return base / 'sports-live' / 'ad-mute'
 
 
+def venv_python(venv):
+    venv = pathlib.Path(venv)
+    return venv / 'Scripts' / 'python.exe' if os.name == 'nt' else venv / 'bin' / 'python'
+
+
 def installation_paths():
     root = installation_dir()
     # A locally trained model installed by tools.train_ad_model replaces the original.
     trained = root / 'ad-model.tflite'
-    return root / 'venv' / 'bin' / 'python', trained if trained.is_file() else root / 'nba-ads-v1.tflite'
+    return venv_python(root / 'venv'), trained if trained.is_file() else root / 'nba-ads-v1.tflite'
 
 
 def supported_leagues():
@@ -58,11 +63,23 @@ def installed():
 
 
 def compatible_python():
-    if (3, 9) <= sys.version_info[:2] <= (3, 12):
+    """A Python that the model conversion tools support (TensorFlow 2.16 needs 3.9 through 3.12)."""
+    lowest = 10 if os.name == 'nt' else 9  # the Windows detection runtime starts at 3.10
+    if (3, lowest) <= sys.version_info[:2] <= (3, 12):
         return sys.executable, sys.version_info[:2]
-    for minor in (12, 11, 10, 9):
-        executable = shutil.which(f'python3.{minor}')
-        if executable: return executable, (3, minor)
+    for minor in range(12, lowest - 1, -1):
+        if os.name == 'nt':
+            # The Windows launcher finds every installed version: py -3.12.
+            launcher = shutil.which('py')
+            if not launcher: break
+            try:
+                found = subprocess.run([launcher, f'-3.{minor}', '-c', 'import sys; print(sys.executable)'],
+                                       capture_output=True, text=True, timeout=20)
+            except (OSError, subprocess.SubprocessError): continue
+            if found.returncode == 0 and found.stdout.strip(): return found.stdout.strip(), (3, minor)
+        else:
+            executable = shutil.which(f'python3.{minor}')
+            if executable: return executable, (3, minor)
     return None, None
 
 
@@ -71,19 +88,26 @@ def install():
     if installed():
         print(f'Local AI ad detector already installed in {installation_dir()}.')
         return 0
-    if sys.platform != 'darwin' and not sys.platform.startswith('linux'):
-        print('AI ad detection requires macOS or Linux.', file=sys.stderr); return 1
+    if sys.platform not in ('darwin', 'win32') and not sys.platform.startswith('linux'):
+        print('AI ad detection requires macOS, Linux or Windows.', file=sys.stderr); return 1
     interpreter, python_version = compatible_python()
     if not interpreter:
-        print('The one-time AI setup needs Python 3.9 through 3.12 and venv.', file=sys.stderr); return 1
+        command = os.environ.get('SPORTS_CLI_COMMAND')
+        print('The one-time AI setup needs Python 3.10 through 3.12.' if os.name == 'nt' else
+              'The one-time AI setup needs Python 3.9 through 3.12 and venv.', file=sys.stderr)
+        if command: print(f'Run "{command} --setup-ads" to install a suitable Python and the detector.', file=sys.stderr)
+        return 1
     intel_mac = sys.platform == 'darwin' and platform.machine().lower() in ('x86_64', 'amd64')
     root = installation_dir()
     try: root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
         print(f'Cannot create detector directory: {exc}', file=sys.stderr); return 1
     if root.exists():
-        print(f'Incomplete installation exists at {root}; remove it before retrying.', file=sys.stderr)
-        return 1
+        # Only an interrupted earlier setup leaves this folder without a working detector; start over.
+        print(f'Removing an incomplete earlier setup in {root}.')
+        try: shutil.rmtree(root)
+        except OSError as exc:
+            print(f'Cannot remove the incomplete setup: {exc}', file=sys.stderr); return 1
     print('Installing the optional NBA ad detector. This downloads a 150 MB source model and conversion packages;')
     print('allow about 1.5 GB of temporary space. The final model is about 22 MB.', flush=True)
     if intel_mac: print('Intel macOS needs the larger TensorFlow runtime.')
@@ -110,8 +134,8 @@ def install():
         converter = build / 'venv'
         with progress.activity('Installing temporary conversion tools'):
             subprocess.run([interpreter, '-m', 'venv', str(converter)], check=True)
-            conversion_python = converter / 'bin' / 'python'
-            tensorflow = 'tensorflow==2.16.2' if sys.platform == 'darwin' else 'tensorflow-cpu==2.16.2'
+            conversion_python = venv_python(converter)
+            tensorflow = 'tensorflow-cpu==2.16.2' if sys.platform.startswith('linux') else 'tensorflow==2.16.2'
             subprocess.run([str(conversion_python), '-m', 'pip', 'install', '--quiet', '--no-cache-dir',
                             tensorflow, 'keras==3.3.3'], check=True)
         env = os.environ.copy()
@@ -125,7 +149,7 @@ def install():
         shutil.rmtree(build)
         with progress.activity('Installing the isolated detection runtime'):
             subprocess.run([interpreter, '-m', 'venv', str(temporary / 'venv')], check=True)
-            python = temporary / 'venv' / 'bin' / 'python'
+            python = venv_python(temporary / 'venv')
             runtime = ('tensorflow==2.16.2' if intel_mac else
                        'ai-edge-litert==1.4.0' if python_version == (3, 9) else 'ai-edge-litert==2.3.0')
             subprocess.run([str(python), '-m', 'pip', 'install', '--quiet', '--no-cache-dir', runtime, 'Pillow>=10,<12'], check=True)
@@ -135,7 +159,8 @@ def install():
             raise ValueError('The installed detector could not load the model')
         # Use the venv Python directly; do not rely on relocation-sensitive pip scripts.
         os.rename(temporary, root)
-        print('Installed. Run ./sports-cli --ai-ad-mute to enable it for a session.')
+        command = os.environ.get('SPORTS_CLI_COMMAND') or './sports-cli'
+        print(f'Installed. Run "{command} --ai-ad-observe" to preview it, or "{command} --ai-ad-mute" to mute ads.')
         return 0
     except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
         print(f'Optional AI detector installation failed: {exc}', file=sys.stderr)
@@ -199,6 +224,7 @@ class Monitor:
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.process = None
+        self.replies = queue.Queue()
 
     def start(self): self.thread.start()
 
@@ -212,17 +238,23 @@ class Monitor:
             try: self.process.kill(); self.process.wait(timeout=2)
             except (ProcessLookupError, subprocess.TimeoutExpired): pass
 
+    def _collect_replies(self):
+        # A reader thread, because Windows cannot wait on a pipe with select.
+        for line in self.process.stdout: self.replies.put(line)
+        self.replies.put(None)
+
     def _read_worker(self, timeout):
         deadline = time.monotonic() + timeout
         while not self.stopped.is_set() and time.monotonic() < deadline:
-            if self.process.poll() is not None: raise OSError('AI detector exited')
-            if select.select([self.process.stdout], [], [], .2)[0]:
-                value = json.loads(self.process.stdout.readline())
-                if isinstance(value, dict): return value
+            try: line = self.replies.get(timeout=.2)
+            except queue.Empty: continue
+            if line is None: raise OSError('AI detector exited')
+            value = json.loads(line)
+            if isinstance(value, dict): return value
         raise OSError('AI detector did not respond')
 
     def run(self):
-        sock = None; reader = None; state = MuteState(); command = None; on_break = False
+        connection = None; state = MuteState(); command = None; on_break = False
         image = self.directory / 'current-frame.jpg'
         try:
             env = os.environ.copy()
@@ -230,19 +262,14 @@ class Monitor:
                         'TF_NUM_INTRAOP_THREADS':'2', 'TF_NUM_INTEROP_THREADS':'1', 'TF_CPP_MIN_LOG_LEVEL':'3'})
             self.process = subprocess.Popen([str(self.python), '-u', str(WORKER), str(self.model)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sock.settimeout(2)
-            deadline = time.monotonic() + 10
-            while not self.stopped.is_set():
-                try: sock.connect(self.path); break
-                except OSError:
-                    if time.monotonic() >= deadline: raise
-                    self.stopped.wait(.1)
-            else: return
-            reader = sock.makefile('rb'); request_id = 0; playback_epoch = 0
+            threading.Thread(target=self._collect_replies, daemon=True).start()
+            connection = ad_mute.connect(self.path, 2, self.stopped)
+            if connection is None: return
+            reader = connection.reader; request_id = 0; playback_epoch = 0
             def invoke(*args):
                 nonlocal request_id, playback_epoch
                 request_id += 1
-                sock.sendall((json.dumps({'command':args, 'request_id':request_id})+'\n').encode())
+                connection.send((json.dumps({'command':args, 'request_id':request_id})+'\n').encode())
                 deadline = time.monotonic() + 2
                 # Cleanup must still be able to use IPC after stop() is requested.
                 while time.monotonic() < deadline:
@@ -367,10 +394,9 @@ class Monitor:
                 except (OSError, ValueError): pass
             try: image.unlink(missing_ok=True)
             except OSError: pass
-            if reader:
-                try: reader.close()
+            if connection:
+                try: connection.close()
                 except OSError: pass
-            if sock: sock.close()
             if self.process:
                 if self.process.poll() is None:
                     try: self.process.terminate()

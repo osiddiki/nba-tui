@@ -1,6 +1,6 @@
 # Agent and developer setup
 
-This repository is a Python terminal app for discovering and playing sports streams and replays. Use Python 3.9 or newer. The app itself uses the standard library; mpv is the default player. IINA is an optional macOS player and Celluloid is an optional Linux player. The PPV resolver is a separate Node.js 20+ checkout installed by `./setup.sh` into the ignored `resolver/` directory.
+This repository is a Python terminal app for discovering and playing sports streams and replays, on macOS, Linux and Windows. Use Python 3.9 or newer. The app itself uses the standard library, plus `windows-curses` and `tzdata` on Windows; mpv is the default player. IINA is an optional macOS player and Celluloid is an optional Linux player. The PPV resolver is a separate Node.js 20+ checkout installed by `./setup.sh` into the ignored `resolver/` directory.
 
 Run the local checks from the repository root:
 
@@ -14,7 +14,8 @@ To prove a change in the real app, use the project skill `.claude/skills/verify-
 
 ## Code map
 
-- `install.sh`: the one-command installer for non-developers; it installs only missing pieces (Homebrew, Python, mpv; Node.js only with `--ppv`), unpacks the app into `~/.local/share/sports-cli`, and writes the `sports` launcher, which sets `SPORTS_CLI_COMMAND` so missing-piece messages name `sports --setup` or `sports --setup-ppv`.
+- `install.sh` (macOS, Linux) and `install.ps1` (Windows, through winget): the one-command installers for non-developers. They install only missing pieces (Homebrew on a Mac, Python, mpv; Node.js only with `--ppv`/`-Ppv`; a detector-compatible Python and the ad model only with `--ads`/`-Ads`), unpack the app without Git, and write the `sports` launcher, which sets `SPORTS_CLI_COMMAND` so missing-piece messages name `sports --setup`, `--setup-ppv` or `--setup-ads`. Windows has no `setup.sh`; `install.ps1` does its work itself.
+- Windows differences live at the boundary: `ad_mute.ipc_path` and `ad_mute.Connection` (named pipe instead of a Unix socket), `ai_ad_mute.venv_python` (`Scripts\python.exe`) and its `py` launcher search, and `save_config` (no POSIX modes). Keep new mpv IPC on `ad_mute.connect`.
 - `sports-cli`: the only user-facing executable; `sportscli/app.py`: schedules, sources, screens, asynchronous discovery, player launch and configuration.
 - `sportscli/smart_search.py`: local query parsing, team suggestions, and result ranking. `sportscli/data/teams.json` is the bundled ESPN team-name index; refresh it with `python3 -m sportscli.tools.update_teams` when appropriate.
 - `sportscli/screens.py`: the screen statechart. `App.handle_key` implements it and `tests/test_screens.py` explores every screen state with every key against it; update the chart and `docs/screens.md` with any navigation change.

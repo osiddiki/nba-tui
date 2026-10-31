@@ -279,6 +279,36 @@ class AiAdMuteTests(unittest.TestCase):
             self.assertFalse(nba.App(None, {'ai_ad_mute':True}).ai_ad_mute)
             self.assertTrue(nba.App(None, {}, ai_ad_mute_enabled=True).ai_ad_mute)
 
+    def test_windows_uses_named_pipes_scripts_and_the_py_launcher(self):
+        windows = SimpleNamespace(name='nt', environ=os.environ)
+        with patch.object(ai_ad_mute, 'os', windows), patch.object(ai_ad_mute.ad_mute, 'os', SimpleNamespace(name='nt', path=os.path)):
+            self.assertEqual(ai_ad_mute.ad_mute.ipc_path('/tmp/sports-mpv-abc'), r'\\.\pipe\sports-mpv-sports-mpv-abc')
+            self.assertEqual(ai_ad_mute.venv_python('/data/venv').parts[-2:], ('Scripts', 'python.exe'))
+            found = SimpleNamespace(returncode=0, stdout='C:\\Python312\\python.exe\n')
+            missing = SimpleNamespace(returncode=103, stdout='')
+            with patch.object(ai_ad_mute.sys, 'version_info', (3, 13, 0)), \
+                 patch.object(ai_ad_mute.shutil, 'which', return_value='C:\\Windows\\py.exe'), \
+                 patch.object(ai_ad_mute.subprocess, 'run', side_effect=[found]) as run:
+                self.assertEqual(ai_ad_mute.compatible_python(), ('C:\\Python312\\python.exe', (3, 12)))
+                self.assertEqual(run.call_args.args[0][1], '-3.12')
+            # 3.9 has no Windows detection runtime, so it is never chosen there.
+            with patch.object(ai_ad_mute.sys, 'version_info', (3, 9, 0)), \
+                 patch.object(ai_ad_mute.shutil, 'which', return_value='C:\\Windows\\py.exe'), \
+                 patch.object(ai_ad_mute.subprocess, 'run', return_value=missing) as run:
+                self.assertEqual(ai_ad_mute.compatible_python(), (None, None))
+                self.assertEqual([call.args[0][1] for call in run.call_args_list], ['-3.12', '-3.11', '-3.10'])
+
+    def test_installer_replaces_an_interrupted_setup(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'XDG_DATA_HOME': root}), \
+             patch.object(ai_ad_mute, 'compatible_python', return_value=(sys.executable, (3, 12))), \
+             patch.object(ai_ad_mute.urllib.request, 'urlopen', side_effect=OSError('offline')), \
+             patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO) as errors:
+            leftover = ai_ad_mute.installation_dir() / 'venv'
+            leftover.mkdir(parents=True)
+            self.assertEqual(ai_ad_mute.install(), 1)
+            self.assertFalse(leftover.exists())
+            self.assertIn('offline', errors.getvalue())
+
     def test_explicit_installer_checks_download_before_installing(self):
         contents = b'local test model'
         def run(args, **kwargs):

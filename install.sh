@@ -1,17 +1,18 @@
 #!/bin/sh
 # Install or update Sports CLI with one command:
 #   curl -fsSL https://raw.githubusercontent.com/osiddiki/sports-cli/main/install.sh | sh
-# Options: --ppv also sets up Node.js and the PPV resolver; --yes skips the confirmation.
+# Options: --ppv also sets up Node.js and the PPV resolver, --ads the local ad detector; --yes skips the confirmation.
 set -eu
 
 REPO=osiddiki/sports-cli
 ARCHIVE=${SPORTS_CLI_ARCHIVE:-https://github.com/$REPO/archive/refs/heads/main.tar.gz}
 APP=${SPORTS_CLI_HOME:-$HOME/.local/share/sports-cli}
 BIN=$HOME/.local/bin
-PPV=0; YES=0
+PPV=0; ADS=0; YES=0
 for arg in "$@"; do
   case $arg in
     --ppv) PPV=1 ;;
+    --ads) ADS=1 ;;
     --yes) YES=1 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -25,7 +26,7 @@ has() { command -v "$1" >/dev/null 2>&1; }
 case $(uname -s) in
   Darwin) OS=mac ;;
   Linux) OS=linux ;;
-  *) fail 'Sports CLI runs on macOS and Linux. On Windows, install WSL (https://aka.ms/wsl) and run this command inside Ubuntu.' ;;
+  *) fail 'this installer is for macOS and Linux. On Windows, open PowerShell and run: irm https://raw.githubusercontent.com/osiddiki/sports-cli/main/install.ps1 | iex' ;;
 esac
 has curl || fail 'curl is needed to download Sports CLI.'
 has tar || fail 'tar is needed to unpack Sports CLI.'
@@ -46,16 +47,32 @@ find_python() {
   return 1
 }
 PYTHON=$(find_python || true)
+# The ad detector's one-time model conversion needs Python 3.9 to 3.12 with venv.
+ads_python() {
+  for candidate in python3.12 python3.11 python3.10 python3.9 python3; do
+    path=$(command -v "$candidate" 2>/dev/null) || continue
+    if [ "$OS" = mac ] && [ "$path" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
+    "$path" -c 'import sys; sys.exit(not (3, 9) <= sys.version_info[:2] <= (3, 12))' >/dev/null 2>&1 || continue
+    probe=$(mktemp -d)
+    if "$path" -m venv "$probe/venv" >/dev/null 2>&1; then rm -rf "$probe"; echo "$path"; return 0; fi
+    rm -rf "$probe"
+  done
+  return 1
+}
+ADS_PYTHON=''
+if [ "$ADS" = 1 ]; then ADS_PYTHON=$(ads_python || true); fi
 
 needs=''
 [ -n "$PYTHON" ] || needs="$needs Python,"
 has mpv || needs="$needs mpv (the video player),"
 if [ "$PPV" = 1 ]; then has node || needs="$needs Node.js (for PPV sources),"; fi
+if [ "$ADS" = 1 ] && [ -z "$ADS_PYTHON" ]; then needs="$needs Python 3.12 (for the ad detector),"; fi
 if [ "$OS" = mac ] && [ -n "$needs" ] && ! has brew; then needs=" Homebrew (the Mac package installer),$needs"; fi
 
 say "Sports CLI will be installed in $APP and started with the command: sports"
 if [ -n "$needs" ]; then echo "It will also install:${needs%,}."; fi
 if [ "$OS" = linux ] && [ -n "$needs" ]; then echo 'Your password may be asked for to install those.'; fi
+if [ "$ADS" = 1 ]; then echo 'The ad detector setup downloads about 1.5 GB of tools once and keeps a 22 MB model.'; fi
 if [ "$YES" = 0 ] && [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
   printf 'Press Enter to continue, or Ctrl-C to cancel. '
   read -r _ </dev/tty || true
@@ -89,6 +106,16 @@ fi
 if ! has mpv; then
   say 'Installing mpv'
   if [ "$OS" = mac ]; then run brew install mpv; else linux_install mpv; fi
+fi
+if [ "$ADS" = 1 ] && [ -z "$ADS_PYTHON" ]; then
+  say 'Installing Python 3.12 for the ad detector'
+  if [ "$OS" = mac ]; then run brew install python@3.12
+  # Debian and Ubuntu ship venv separately; 3.12 is the system Python on Ubuntu 24.04.
+  elif has apt-get; then linux_install python3-venv
+  else linux_install python3
+  fi
+  ADS_PYTHON=$(ads_python || true)
+  [ -n "$ADS_PYTHON" ] || [ "${SPORTS_CLI_DRY_RUN:-0}" = 1 ] || fail 'the ad detector needs Python 3.9 to 3.12 with venv, which this system does not offer. Install one, then run "sports --setup-ads".'
 fi
 if [ "$PPV" = 1 ] && ! has node; then
   say 'Installing Node.js'
@@ -127,6 +154,7 @@ case "\${1:-}" in
   --update) curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --yes; exit ;;
   --setup) exec sh "$APP/install.sh" --yes ;;
   --setup-ppv) exec sh "$APP/install.sh" --yes --ppv ;;
+  --setup-ads) exec sh "$APP/install.sh" --yes --ads ;;
 esac
 PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
 SPORTS_CLI_COMMAND=sports
@@ -150,6 +178,13 @@ if [ "$on_path" = 0 ]; then
   done
 fi
 
+if [ "$ADS" = 1 ]; then
+  say 'Setting up the local ad detector'
+  # The app's installer picks a Python that the conversion tools support from PATH.
+  PATH="$(dirname "$ADS_PYTHON"):$PATH" SPORTS_CLI_COMMAND=sports run "$PYTHON" "$APP/sports-cli" --install-ad-model ||
+    fail 'the ad detector could not be set up. Everything else works; run "sports --setup-ads" to try again.'
+fi
+
 say 'Sports CLI is ready'
 if [ "$on_path" = 1 ]; then echo 'Type: sports'; else echo 'Open a new Terminal window and type: sports'; fi
-echo 'Later: "sports --update" updates it, and "sports --setup-ppv" adds PPV sources.'
+echo 'Later: "sports --update" updates it, "sports --setup-ppv" adds PPV sources, "sports --setup-ads" adds ad detection.'
